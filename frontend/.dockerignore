@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.angular/
+coverage/
+out-tsc/
+.idea/
+*.iml
+.git/
+.env
+.env.*
+*.log
+logs/
+*.tmp
+*.temp
+.DS_Store

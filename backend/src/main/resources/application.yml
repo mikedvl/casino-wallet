@@ -1,0 +1,48 @@
+spring:
+  application:
+    name: casino-wallet
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:casino_wallet}?connectTimeout=2&socketTimeout=3
+    username: ${DB_USER:casino_wallet}
+    password: ${DB_PASSWORD:casino_wallet}
+    hikari:
+      initialization-fail-timeout: -1
+      connection-timeout: 2000
+      validation-timeout: 1000
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    access:
+      default: none
+    web:
+      exposure:
+        include: health,info,metrics
+      discovery:
+        enabled: false
+    jmx:
+      exposure:
+        exclude: "*"
+  endpoint:
+    health:
+      access: read-only
+      show-details: never
+      show-components: never
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db
+    info:
+      access: read-only
+    metrics:
+      access: read-only
+
+logging:
+  pattern:
+    console: >-
+      time=%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%level app=casino-wallet request_id=%X{requestId:-none} logger=%logger{36} message="%replace(%msg){'[\r\n"]','_'}"%n%ex
