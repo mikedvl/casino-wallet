@@ -6,7 +6,9 @@ The project is implemented in small, reviewable vertical slices with a green bui
 
 > **Current status:** repository bootstrap only.
 >
-> The backend currently exposes infrastructure and observability endpoints, while the frontend renders a minimal application shell. Wallet tables, financial APIs, deposits, callbacks, ledger, bonuses, rounds and translations are not implemented yet.
+> The backend currently exposes infrastructure and observability endpoints, while the frontend renders a minimal application shell.
+>
+> Wallet tables, financial APIs, deposits, callbacks, ledger, bonuses, rounds and translations are not implemented yet.
 
 See:
 
@@ -15,7 +17,7 @@ See:
 
 ---
 
-## Architecture
+# Architecture
 
 ```mermaid
 flowchart LR
@@ -24,7 +26,7 @@ flowchart LR
     Backend --> PostgreSQL[(PostgreSQL 16)]
 ```
 
-The application uses three runtime containers:
+The production/demo runtime consists of three separate services:
 
 ```text
 Browser
@@ -44,15 +46,105 @@ postgres
 PostgreSQL 16
 ```
 
-PostgreSQL, backend and frontend run as separate services.
+Responsibilities:
 
-For active development, only PostgreSQL normally runs in Docker. Backend and frontend run locally for faster feedback, debugging and live reload.
+```text
+Frontend
+  - serves Angular SPA
+  - proxies /api
+  - exposes /health
+  - propagates X-Request-ID
+  - writes access/error logs
 
-The complete Docker Compose stack exists for reproducible clean-clone verification and reviewer convenience.
+Backend
+  - REST API
+  - business rules
+  - transaction boundaries
+  - observability
+  - future wallet locking and financial consistency
+
+PostgreSQL
+  - durable application state
+  - future financial source of truth
+  - ACID transactions
+  - database constraints
+  - row locking
+```
 
 ---
 
-## Repository structure
+# Run Modes
+
+The project intentionally supports **two different execution modes**.
+
+They solve different problems and should not be confused.
+
+| Mode | PostgreSQL | Backend | Frontend | Primary purpose |
+|---|---|---|---|---|
+| **DEV** | Docker | Local / IntelliJ | Local Angular dev server | Fast development, debugging, hot reload |
+| **DEMO** | Docker | Docker | Docker + Nginx | Reproducible reviewer / clean-clone execution |
+
+## DEV mode
+
+Preferred during active development:
+
+```text
+Browser
+   |
+   v
+Angular Dev Server
+localhost:4200
+   |
+   | /api proxy
+   v
+Spring Boot
+localhost:8080
+   |
+   | JDBC
+   v
+PostgreSQL
+Docker
+```
+
+Advantages:
+
+- Kotlin breakpoints in IntelliJ IDEA
+- TypeScript/JavaScript debugging
+- Angular live reload
+- Spring Boot DevTools restart
+- faster feedback loop
+- no Docker image rebuild after every source change
+
+## DEMO mode
+
+Used for reviewer verification:
+
+```text
+Browser
+   |
+   v
+Frontend container
+Angular build + Nginx
+   |
+   v
+Backend container
+Spring Boot
+   |
+   v
+PostgreSQL container
+```
+
+The complete application starts with:
+
+```bash
+docker compose up --build
+```
+
+This mode proves that the repository can be cloned and run reproducibly without relying on the developer's IDE configuration.
+
+---
+
+# Repository Structure
 
 ```text
 casino-wallet/
@@ -60,7 +152,7 @@ casino-wallet/
 ├── frontend/                Angular application and Nginx Docker image
 ├── scripts/
 │   └── verify.sh            Local verification pipeline
-├── compose.yaml             PostgreSQL, backend and frontend
+├── compose.yaml             PostgreSQL, backend and frontend services
 ├── README.md
 ├── NOTES.md
 ├── IMPLEMENTATION_PLAN.md
@@ -73,7 +165,7 @@ The local `docs/` directory contains private development notes and is intentiona
 
 ---
 
-## Technology stack
+# Technology Stack
 
 | Component | Version |
 |---|---|
@@ -95,14 +187,15 @@ Gradle dependency versions are reproducible through the committed Gradle Wrapper
 
 ---
 
-## Prerequisites
+# Prerequisites
 
-### Full containerized run
+## DEMO mode
 
 Required:
 
 - Docker Engine or Docker Desktop
 - Docker Compose v2
+- `curl` for optional manual smoke checks
 
 Tested with:
 
@@ -111,7 +204,9 @@ Docker Engine: 28.0.4
 Docker Compose: 2.34.0
 ```
 
-### Local development
+No local Java or Node installation is required to run the complete containerized stack.
+
+## DEV mode
 
 Additionally required:
 
@@ -120,7 +215,7 @@ Additionally required:
 - npm
 - Bash
 - Chrome or Chromium
-- running Docker daemon for Testcontainers
+- running Docker daemon for PostgreSQL and Testcontainers
 
 Recommended Node version:
 
@@ -128,7 +223,18 @@ Recommended Node version:
 20.20.2
 ```
 
-The repository contains `frontend/.nvmrc` for local Node version selection.
+The repository contains:
+
+```text
+frontend/.nvmrc
+```
+
+For `nvm` users:
+
+```bash
+cd frontend
+nvm use
+```
 
 Verify the local environment:
 
@@ -139,37 +245,70 @@ npm --version
 docker compose version
 ```
 
+Expected major versions:
+
+```text
+Java: 21
+Node: 20
+Docker Compose: 2
+```
+
 Set `JAVA_HOME` to JDK 21.
 
 If Chrome is not detected automatically by frontend tests, configure `CHROME_BIN`.
 
 ---
 
-## Full containerized quick start
+# DEMO Mode — Full Containerized Run
 
-Create local environment configuration:
+This is the recommended way for a reviewer to run the project.
+
+## 1. Create local environment configuration
+
+From the repository root:
 
 ```bash
 cp .env.example .env
 ```
 
-Start the complete stack:
+The values in `.env.example` are disposable local defaults, not production credentials.
+
+The real `.env` file is ignored by Git.
+
+## 2. Start the complete stack
 
 ```bash
 docker compose up --build
 ```
 
-The `.env.example` values are disposable local defaults, not production credentials.
+Docker Compose starts:
 
-The real `.env` file is ignored by Git.
+```text
+postgres
+   ↓ healthy
 
-If port `5432` is already occupied, change `POSTGRES_PORT` in `.env`, for example:
+backend
+   ↓ ready
+
+frontend
+   ↓ healthy
+```
+
+If port `5432` is already occupied, change the published PostgreSQL port in `.env`:
 
 ```text
 POSTGRES_PORT=15432
 ```
 
-### Service URLs
+The internal container connection remains:
+
+```text
+postgres:5432
+```
+
+Only the host mapping changes.
+
+## Service URLs
 
 | Service | Default address |
 |---|---|
@@ -186,10 +325,15 @@ Inspect the stack:
 
 ```bash
 docker compose ps
+```
+
+Inspect logs:
+
+```bash
 docker compose logs -f
 ```
 
-Stop it:
+Stop the stack:
 
 ```bash
 docker compose down
@@ -197,66 +341,276 @@ docker compose down
 
 The PostgreSQL named volume is preserved.
 
-Use `docker compose down -v` only when the local database should intentionally be deleted.
+Use:
 
-Both application containers run as non-root users.
+```bash
+docker compose down -v
+```
 
-Runtime images contain only runtime artifacts, not project source trees or build caches.
+only when the local database should intentionally be deleted.
+
+Backend and frontend containers run as non-root users.
+
+Runtime images contain runtime artifacts only, not project source trees or build caches.
 
 ---
 
-## Fast local development
+# DEV Mode — Fast Local Development
 
-### 1. Start PostgreSQL
+DEV mode is the preferred workflow while changing application code.
+
+The architecture is:
+
+```text
+PostgreSQL -> Docker
+Backend    -> local JVM / IntelliJ IDEA
+Frontend   -> local Angular dev server
+Browser    -> Chrome
+```
+
+---
+
+## 1. Start PostgreSQL
+
+From the repository root:
 
 ```bash
 docker compose up -d postgres
 ```
 
-### 2. Start backend
+If local port `5432` is occupied:
 
 ```bash
-cd backend
-./gradlew bootRun
+POSTGRES_PORT=15432 docker compose up -d postgres
 ```
 
-Alternatively, run `CasinoWalletApplication` directly from IntelliJ IDEA using JDK 21.
-
-Spring Boot DevTools supports restart after compiled backend classes change.
-
-### 3. Start frontend
+Check health:
 
 ```bash
-cd frontend
-npm ci
-npm start
+docker compose ps postgres
 ```
 
-Angular's development server provides live reload.
-
-The development proxy forwards:
+Expected:
 
 ```text
-/api/* -> http://localhost:8080
+healthy
 ```
-
-This keeps browser requests relative and avoids a separate CORS configuration for local development.
-
-The production Nginx container forwards the same relative `/api` requests to:
-
-```text
-backend:8080
-```
-
-No casino API routes exist yet, so `/api` currently returns `404`. That is expected during the bootstrap stage.
 
 ---
 
-## Configuration
+## 2. Start backend locally
+
+From:
+
+```bash
+cd backend
+```
+
+Default PostgreSQL port:
+
+```bash
+./gradlew bootRun
+```
+
+If PostgreSQL is published on `15432`:
+
+```bash
+DB_PORT=15432 ./gradlew bootRun
+```
+
+Backend URL:
+
+```text
+http://localhost:8080
+```
+
+Health checks:
+
+```bash
+curl http://localhost:8080/actuator/health/liveness
+curl http://localhost:8080/actuator/health/readiness
+```
+
+Expected:
+
+```json
+{"status":"UP"}
+```
+
+Spring Boot DevTools supports application restart after compiled classes change.
+
+---
+
+## 3. Start frontend locally
+
+In another terminal:
+
+```bash
+cd frontend
+nvm use
+npm start
+```
+
+or without `nvm`:
+
+```bash
+cd frontend
+npm start
+```
+
+Frontend URL:
+
+```text
+http://localhost:4200
+```
+
+Angular development server provides live reload.
+
+---
+
+# Local API Proxy
+
+Browser code always uses relative API URLs:
+
+```text
+/api/*
+```
+
+In DEV mode:
+
+```text
+Browser
+   ↓
+Angular Dev Server :4200
+   ↓
+proxy.conf.json
+   ↓
+Spring Boot :8080
+```
+
+The proxy target is:
+
+```text
+http://localhost:8080
+```
+
+This avoids development-only CORS configuration.
+
+In DEMO mode:
+
+```text
+Browser
+   ↓
+Nginx
+   ↓
+/api
+   ↓
+backend:8080
+```
+
+No casino API exists during the bootstrap stage.
+
+Therefore:
+
+```text
+/api/*
+```
+
+currently returns `404`, which is expected.
+
+A `404` returned through the development proxy confirms that the Angular dev server reached Spring Boot successfully.
+
+---
+
+# IntelliJ IDEA Development Workflow
+
+Five shared profiles are stored in `.run/` and appear in **Run / Debug Configurations** when the repository root is opened in IntelliJ IDEA.
+
+## One-time IDE setup
+
+- Link `backend/build.gradle.kts` as a Gradle project and let the import finish. The backend profile uses the imported `com.example.casino-wallet.main` module.
+- Select JDK 21 as the Project SDK and Gradle JVM.
+- Select Node 20 as the project Node runtime and its npm as the project package manager. `frontend/.nvmrc` remains the CLI version reference. Run `npm ci` in `frontend/` once before starting the dev server.
+- Configure a local Docker connection named `Docker` in **Settings → Build, Execution, Deployment → Docker**, and start the Docker daemon.
+- Configure the installed Chrome executable in **Settings → Tools → Web Browsers and Preview**. IntelliJ must have its Spring Boot, Docker, npm and JavaScript debugging support available.
+
+JDK, Node, Docker socket and browser executable locations are machine-local IDE settings. Shared profiles contain project-relative paths and no credentials.
+
+| Profile | Native type | Behaviour |
+| --- | --- | --- |
+| `01 - PostgreSQL` | Docker Compose | Starts only `postgres` in detached mode with `POSTGRES_PORT=15432`. |
+| `02 - Backend` | Spring Boot | Starts PostgreSQL as a Before Launch task, then the local JVM with `DB_HOST=localhost` and `DB_PORT=15432`. |
+| `03 - Frontend` | npm | Runs `npm run start` from `frontend/package.json`, opens `http://localhost:4200` in Chrome and starts the browser JavaScript debugger. |
+| `DEV - Full Stack` | Compound | Starts `02 - Backend` and `03 - Frontend` together. PostgreSQL is supplied by the backend prerequisite. |
+| `DEMO - Full Stack` | Docker Compose | Builds and starts `postgres`, `backend` and `frontend` from the existing `compose.yaml`, equivalent to `docker compose up --build`. |
+
+## DEV: Run, Debug and reload
+
+Select **DEV - Full Stack → Run** for local development, or **Debug** for Kotlin and TypeScript breakpoints. The backend runs on JDK 21 and the frontend uses the project Node runtime. Browser JavaScript debugging is enabled for both actions.
+
+The IDEA DEV database mapping is always `127.0.0.1:15432 → postgres:5432`; port `5432` inside the container is unchanged. Existing development database defaults are reused.
+
+The frontend and backend can start in parallel, so the page may become available before backend readiness turns `UP`. Angular keeps the existing `/api` proxy to `http://localhost:8080`; bootstrap API requests return the expected backend `404`.
+
+Angular watches source files and reloads the browser. Spring Boot DevTools restarts the backend when compiled classes or resources change; use **Build Project** after backend edits. Kotlin breakpoints work directly in backend sources, and browser source maps support TypeScript breakpoints. If a startup breakpoint was passed before the browser debugger attached, reload the page.
+
+Use IntelliJ's **Stop** menu to stop the DEV child sessions together (or **Stop All** when only this stack is running). The detached PostgreSQL service remains available. Stop it separately in Docker Services or with `docker compose stop postgres`; its named volume is preserved. Close the debug Chrome window before a fresh launch if IDEA reports that its browser profile is already in use.
+
+## DEMO and CLI
+
+Stop the local DEV processes before launching DEMO because both modes use host ports `8080` and `4200`. DEMO builds both application images and retains the existing Compose healthchecks and startup dependencies. Stop the stack through Docker Services or `docker compose stop`; do not select volume removal.
+
+DEMO uses normal Compose environment settings: PostgreSQL defaults to host port `5432`. If that port is occupied, set `POSTGRES_PORT=15432` in the ignored root `.env`, as described in the Docker workflow above.
+
+All CLI workflows remain independent of IntelliJ, including `docker compose up --build`, `./gradlew bootRun`, `npm start` and `./scripts/verify.sh`.
+
+---
+
+# DEV vs DEMO
+
+Use **DEV mode** when:
+
+- writing backend code;
+- debugging Kotlin;
+- writing frontend code;
+- debugging TypeScript;
+- using hot reload;
+- iterating quickly.
+
+```text
+PostgreSQL Docker
++
+local Spring Boot
++
+local Angular
+```
+
+Use **DEMO mode** when:
+
+- validating the delivered application;
+- reproducing reviewer setup;
+- testing Docker images;
+- testing Nginx;
+- verifying service startup ordering;
+- performing a clean-clone smoke test.
+
+```text
+PostgreSQL Docker
++
+backend Docker
++
+frontend Docker
+```
+
+Do not use full Docker image rebuilds as the normal source-code development loop.
+
+---
+
+# Configuration
 
 Local backend defaults match `.env.example`.
 
-The backend supports:
+Supported backend environment variables:
 
 ```text
 DB_HOST
@@ -267,13 +621,13 @@ DB_PASSWORD
 SERVER_PORT
 ```
 
-For local execution, export custom values before starting Spring Boot.
-
 Example:
 
 ```bash
 export DB_HOST=localhost
 export DB_PORT=15432
+
+cd backend
 ./gradlew bootRun
 ```
 
@@ -283,15 +637,15 @@ Docker Compose maps its PostgreSQL configuration into the backend container auto
 
 ---
 
-## Verification
+# Verification
 
-Run the complete local verification pipeline from the repository root:
+Run the full local verification pipeline from the repository root:
 
 ```bash
 ./scripts/verify.sh
 ```
 
-The script can be invoked from any current directory.
+The script works from any current directory.
 
 It performs:
 
@@ -310,7 +664,7 @@ Infrastructure
   -> Docker Compose configuration validation
 ```
 
-The backend Gradle invocation is:
+Backend verification uses:
 
 ```bash
 ./gradlew --no-daemon check bootJar
@@ -322,39 +676,64 @@ H2 is not used.
 
 Required checks are never silently skipped.
 
+A successful verification means:
+
+```text
+source code compiles
++
+tests pass
++
+production artifacts build
++
+Compose configuration is valid
+```
+
+It does not automatically start the long-lived full stack.
+
 ---
 
-## Full-stack smoke test
+# Full-Stack Smoke Test
 
-The complete Docker stack is verified separately from `verify.sh`.
+The complete Docker stack is verified separately.
 
 ```bash
 docker compose config --quiet
+
 docker compose build
+
 docker compose up -d --wait --wait-timeout 180
 
 docker compose ps
 
-curl --fail http://localhost:8080/actuator/health/liveness
-curl --fail http://localhost:8080/actuator/health/readiness
-curl --fail http://localhost:8080/actuator/metrics
+curl --fail \
+  http://localhost:8080/actuator/health/liveness
+
+curl --fail \
+  http://localhost:8080/actuator/health/readiness
+
+curl --fail \
+  http://localhost:8080/actuator/metrics
 
 curl --fail -i \
   -H 'X-Request-ID: reviewer-check' \
   http://localhost:8080/actuator/info
 
-curl --fail http://localhost:4200/health
-curl --fail http://localhost:4200/
+curl --fail \
+  http://localhost:4200/health
+
+curl --fail \
+  http://localhost:4200/
 
 docker compose exec frontend \
-  wget -qO- http://backend:8080/actuator/health/readiness
+  wget -qO- \
+  http://backend:8080/actuator/health/readiness
 
 docker compose logs backend frontend
 
 docker compose down
 ```
 
-Expected result:
+Expected:
 
 ```text
 postgres  -> healthy
@@ -362,13 +741,111 @@ backend   -> healthy
 frontend  -> healthy
 ```
 
-Backend readiness verifies actual PostgreSQL connectivity.
+Backend readiness verifies real PostgreSQL connectivity.
 
-Liveness remains independent of PostgreSQL availability so the application process can remain alive and recover after a temporary database outage.
+Liveness remains independent from PostgreSQL so the JVM process can remain alive and recover from a temporary database outage.
 
 ---
 
-## Reliability strategy
+# Manual DEV Smoke Test
+
+For a quick manual verification of the local development workflow:
+
+## PostgreSQL
+
+```bash
+POSTGRES_PORT=15432 docker compose up -d postgres
+```
+
+Verify:
+
+```bash
+docker compose ps postgres
+```
+
+Expected:
+
+```text
+healthy
+```
+
+## Backend
+
+```bash
+cd backend
+DB_PORT=15432 ./gradlew bootRun
+```
+
+Verify:
+
+```bash
+curl -s \
+  http://localhost:8080/actuator/health/liveness
+
+curl -s \
+  http://localhost:8080/actuator/health/readiness
+```
+
+Expected:
+
+```json
+{"status":"UP"}
+```
+
+## Frontend
+
+```bash
+cd frontend
+npm start
+```
+
+Open:
+
+```text
+http://localhost:4200
+```
+
+During the bootstrap stage the page displays:
+
+```text
+Repository bootstrap
+
+Casino Wallet
+
+The application shell is ready.
+Wallet features will arrive in later stages.
+```
+
+## Proxy verification
+
+```bash
+curl -i \
+  -H 'X-Request-ID: manual-proxy-test' \
+  http://localhost:4200/api/manual-check
+```
+
+Expected:
+
+```text
+HTTP 404
+X-Request-ID: manual-proxy-test
+```
+
+The `404` is expected because business API routes do not exist yet.
+
+It confirms:
+
+```text
+Angular development server
+       ↓
+proxy.conf.json
+       ↓
+Spring Boot
+```
+
+---
+
+# Reliability Strategy
 
 Financial functionality is intentionally not implemented in the bootstrap stage.
 
@@ -378,11 +855,11 @@ Later financial stages follow these rules:
 - Each balance-changing use case executes in one application-service transaction.
 - Transaction isolation is `READ_COMMITTED`.
 - Wallet-changing operations use `SELECT ... FOR UPDATE`.
-- The global lock order is wallet first, then the related deposit when required.
+- Global lock order is wallet first, then the related deposit when required.
 - Wallet changes, ledger entries and related domain state commit or roll back together.
 - `REQUIRES_NEW` is not used for financial sub-operations.
 - External network calls are not performed while a financial transaction is open.
-- A successful financial response is returned only after the database transaction commits.
+- Financial success is returned only after the database transaction commits.
 
 Money uses:
 
@@ -407,7 +884,7 @@ These financial tables, locks and constraints belong to later implementation sta
 
 ---
 
-## Consistency strategy
+# Consistency Strategy
 
 Financial state uses strong consistency.
 
@@ -431,11 +908,11 @@ Redis, local caches and TTL-based keys are intentionally excluded from financial
 
 ---
 
-## Observability
+# Observability
 
 The project provides a lightweight observability baseline without deploying a separate monitoring platform.
 
-### Backend
+## Backend
 
 Spring Boot Actuator exposes:
 
@@ -451,7 +928,9 @@ Micrometer provides built-in JVM, HTTP and datasource metrics.
 
 Sensitive Actuator endpoints and sensitive health details are not exposed.
 
-### Request correlation
+---
+
+## Request Correlation
 
 The backend supports:
 
@@ -459,7 +938,7 @@ The backend supports:
 X-Request-ID
 ```
 
-Accepted caller IDs must match:
+Accepted caller IDs match:
 
 ```text
 [A-Za-z0-9._-]{1,128}
@@ -484,21 +963,32 @@ status
 duration
 ```
 
-Request bodies, query strings, credentials and sensitive headers are not logged.
+The application does not log:
 
-### Nginx
+- request bodies;
+- query strings;
+- credentials;
+- secrets;
+- signatures;
+- authorization values.
+
+---
+
+## Nginx
 
 Nginx:
 
 - exposes `/health`;
 - propagates `X-Request-ID`;
 - writes access logs to stdout;
-- writes errors to stderr;
-- records status, request duration and upstream duration.
+- writes error logs to stderr;
+- records status;
+- records request duration;
+- records upstream duration.
 
-### Docker Compose
+---
 
-Healthchecks use:
+## Docker Compose Healthchecks
 
 ```text
 PostgreSQL -> pg_isready
@@ -506,7 +996,7 @@ Backend    -> Actuator readiness
 Frontend   -> /health
 ```
 
-Operational inspection uses:
+Operational inspection:
 
 ```bash
 docker compose ps
@@ -515,7 +1005,7 @@ docker compose logs -f
 
 ---
 
-## Angular 17 security constraint
+# Angular 17 Security Constraint
 
 Angular 17 is explicitly required by the assignment and is therefore pinned to:
 
@@ -525,9 +1015,9 @@ Angular 17 is explicitly required by the assignment and is therefore pinned to:
 
 Angular 17 is no longer within the upstream Angular support window.
 
-At the bootstrap review:
+At bootstrap review:
 
-```text
+```bash
 npm audit --omit=dev
 ```
 
@@ -541,17 +1031,17 @@ reports:
 
 in Angular 17 runtime packages.
 
-A full:
+A complete:
 
-```text
+```bash
 npm audit
 ```
 
-also reports findings in the Angular build/test dependency tree, including deprecated transitive packages.
+also reports findings in Angular build/test dependencies, including deprecated transitive packages.
 
-The automated npm remediation proposes upgrading Angular to a newer major version, which would violate the assignment's explicit Angular 17 requirement.
+Automated remediation proposes upgrading Angular to a newer major version, which would violate the explicit Angular 17 requirement.
 
-Therefore this project intentionally does **not** use:
+Therefore the project intentionally does not run:
 
 ```bash
 npm audit fix --force
@@ -559,28 +1049,30 @@ npm audit fix --force
 
 and does not introduce dependency overrides that create an unsupported mixed Angular dependency graph.
 
-The application is deliberately kept as a simple client-side SPA and does not introduce:
+The application remains a simple client-side SPA and does not introduce:
 
 - Angular SSR;
 - hydration;
 - runtime template compilation;
 - dynamic HTML rendering;
-- unnecessary third-party UI libraries.
+- unnecessary third-party UI frameworks.
 
-For a real production deployment, Angular must be upgraded to a currently supported major version before release.
+For a real production deployment, Angular should be upgraded to a currently supported version before release.
 
 References:
 
-- Angular release support: https://angular.dev/reference/releases
-- Angular version compatibility: https://angular.dev/reference/versions
+- https://angular.dev/reference/releases
+- https://angular.dev/reference/versions
 
-The audit result is documented rather than hidden: a green build does not imply a clean dependency-security audit.
+A green build does not imply a clean dependency-security audit.
+
+Known dependency risks are documented rather than hidden.
 
 ---
 
-## Intentional exclusions
+# Intentional Exclusions
 
-The following components are intentionally outside the scope of this assignment:
+The following components are intentionally outside this assignment:
 
 - Redis;
 - Kafka;
@@ -598,11 +1090,21 @@ The following components are intentionally outside the scope of this assignment:
 
 They are not required for ACID guarantees or correctness of this application.
 
-Possible production extensions include centralized metrics, log aggregation, tracing, managed PostgreSQL, authentication and secrets management when corresponding operational requirements exist.
+Possible production extensions include:
+
+- centralized metrics;
+- centralized logs;
+- distributed tracing;
+- managed PostgreSQL;
+- authentication;
+- secrets management;
+- production backup and replication.
+
+They should be introduced only when corresponding operational requirements exist.
 
 ---
 
-## Development approach
+# Development Approach
 
 Implementation proceeds through small vertical slices.
 
@@ -612,8 +1114,11 @@ Every stage must:
 2. produce a reviewable diff;
 3. include relevant tests;
 4. finish with a green build;
-5. preserve the local development workflow;
-6. preserve the full Docker Compose smoke test;
-7. stop before the next stage until reviewed.
+5. preserve the DEV workflow;
+6. preserve the DEMO Docker Compose workflow;
+7. keep documentation aligned with actual behaviour;
+8. stop before the next stage until reviewed.
 
-The detailed roadmap is maintained in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+The detailed roadmap is maintained in:
+
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
