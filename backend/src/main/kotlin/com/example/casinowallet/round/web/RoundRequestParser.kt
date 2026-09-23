@@ -12,6 +12,7 @@ class RoundRequestParser {
         val stake = body.path("stake")
         val totalWin = body.path("totalWin")
         if (!body.isObject || !stake.isTextual || !totalWin.isTextual) throw invalidAmount()
+        if (listOf("realStake", "bonusStake", "realWin", "bonusWin").any(body::has)) throw invalidAmount()
         return try {
             RoundAmounts.parse(stake.textValue(), totalWin.textValue())
         } catch (_: IllegalArgumentException) {

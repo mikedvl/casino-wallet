@@ -1,6 +1,7 @@
 package com.example.casinowallet.ledger.persistence
 
 import com.example.casinowallet.ledger.domain.LedgerEntry
+import com.example.casinowallet.ledger.domain.WalletType
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import java.math.BigDecimal
@@ -22,22 +23,37 @@ class JdbcLedgerRepository(private val jdbc: NamedParameterJdbcTemplate) {
         )
     }
 
-    fun appendRoundStake(playerId: UUID, roundId: UUID, stake: BigDecimal, balanceAfter: BigDecimal) =
-        appendRound(playerId, roundId, "ROUND_STAKE", stake.negate(), balanceAfter)
-
-    fun appendRoundWin(playerId: UUID, roundId: UUID, win: BigDecimal, balanceAfter: BigDecimal) =
-        appendRound(playerId, roundId, "ROUND_WIN", win, balanceAfter)
-
-    private fun appendRound(playerId: UUID, roundId: UUID, operation: String, amount: BigDecimal, balanceAfter: BigDecimal) {
+    fun appendWelcomeBonus(playerId: UUID, depositId: UUID, amount: BigDecimal, balanceAfter: BigDecimal) {
         jdbc.update(
             // language=PostgreSQL
             """
             insert into ledger_entry
                 (id, player_id, wallet_type, operation_type, amount, balance_after, reference_type, reference_id)
-            values (:id, :playerId, 'REAL', :operation, :amount, :balanceAfter, 'GAME_ROUND', :roundId)
+            values (:id, :playerId, 'BONUS', 'WELCOME_BONUS_GRANTED', :amount, :balanceAfter, 'DEPOSIT', :depositId)
+            """.trimIndent(),
+            mapOf("id" to UUID.randomUUID(), "playerId" to playerId, "depositId" to depositId,
+                "amount" to amount, "balanceAfter" to balanceAfter),
+        )
+    }
+
+    fun appendRoundStake(playerId: UUID, roundId: UUID, walletType: WalletType, stake: BigDecimal, balanceAfter: BigDecimal) =
+        appendRound(playerId, roundId, walletType, "ROUND_STAKE", stake.negate(), balanceAfter)
+
+    fun appendRoundWin(playerId: UUID, roundId: UUID, walletType: WalletType, win: BigDecimal, balanceAfter: BigDecimal) =
+        appendRound(playerId, roundId, walletType, "ROUND_WIN", win, balanceAfter)
+
+    private fun appendRound(
+        playerId: UUID, roundId: UUID, walletType: WalletType, operation: String, amount: BigDecimal, balanceAfter: BigDecimal,
+    ) {
+        jdbc.update(
+            // language=PostgreSQL
+            """
+            insert into ledger_entry
+                (id, player_id, wallet_type, operation_type, amount, balance_after, reference_type, reference_id)
+            values (:id, :playerId, :walletType, :operation, :amount, :balanceAfter, 'GAME_ROUND', :roundId)
             """.trimIndent(),
             mapOf("id" to UUID.randomUUID(), "playerId" to playerId, "roundId" to roundId,
-                "operation" to operation, "amount" to amount, "balanceAfter" to balanceAfter),
+                "walletType" to walletType.name, "operation" to operation, "amount" to amount, "balanceAfter" to balanceAfter),
         )
     }
 

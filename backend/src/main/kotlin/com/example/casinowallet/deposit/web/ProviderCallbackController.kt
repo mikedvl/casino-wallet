@@ -32,6 +32,7 @@ class ProviderCallbackController(
         val result = service.complete(callback.depositId, callback.amount)
         // The transactional service proxy has committed before a success is logged or returned.
         log.info("event=deposit_callback_completed deposit_id={} duplicate={}", result.depositId, result.duplicate)
+        if (result.bonusGranted) log.info("event=welcome_bonus_granted deposit_id={}", result.depositId)
         return CallbackResponse(result.depositId, DepositStatus.COMPLETED)
     }
 }

@@ -42,7 +42,7 @@ class RoundSchemaIntegrationTest @Autowired constructor(
     @Test
     fun `clean migrations define only the current round fields with exact money and required types`() {
         flyway.validate()
-        assertThat(flyway.info().applied().map { it.version.toString() }).containsExactly("1", "2", "3", "4")
+        assertThat(flyway.info().applied().map { it.version.toString() }).containsExactly("1", "2", "3", "4", "5")
         assertThat(flyway.migrate().migrationsExecuted).isZero()
         val columns = jdbc.queryForList(
             // language=PostgreSQL
@@ -51,11 +51,12 @@ class RoundSchemaIntegrationTest @Autowired constructor(
             from information_schema.columns where table_schema = 'public' and table_name = 'game_round'
             """.trimIndent(),
         )
-        assertThat(columns.map { it["column_name"] }).containsExactlyInAnyOrder("id", "player_id", "stake", "total_win", "created_at")
+        assertThat(columns.map { it["column_name"] }).containsExactlyInAnyOrder("id", "player_id", "stake", "total_win", "created_at",
+            "real_stake", "bonus_stake", "real_win", "bonus_win")
         for (column in columns) {
             assertThat(column["is_nullable"]).isEqualTo("NO")
             when (column["column_name"]) {
-                "stake", "total_win" -> {
+                "stake", "total_win", "real_stake", "bonus_stake", "real_win", "bonus_win" -> {
                     assertThat(column["data_type"]).isEqualTo("numeric")
                     assertThat(column["numeric_precision"]).isEqualTo(19)
                     assertThat(column["numeric_scale"]).isEqualTo(2)
@@ -78,12 +79,14 @@ class RoundSchemaIntegrationTest @Autowired constructor(
         insertLedger("DEPOSIT_COMPLETED", "DEPOSIT", "10.00", referenceId = depositId)
         jdbc.update("update wallet set real_balance = 10.00 where player_id = ?", DemoPlayer.ID)
         val entries = jdbc.queryForList("select * from ledger_entry")
-        assertThat(flyway.migrate().migrationsExecuted).isEqualTo(1)
-        flyway.validate()
+        val stage4 = Flyway.configure().dataSource(dataSource).target("4").load()
+        assertThat(stage4.migrate().migrationsExecuted).isEqualTo(1)
+        stage4.validate()
         assertThat(jdbc.queryForList("select version, checksum from flyway_schema_history where version in ('1', '2', '3') order by installed_rank"))
             .isEqualTo(history)
         assertThat(jdbc.queryForList("select * from ledger_entry")).isEqualTo(entries)
         assertThat(jdbc.queryForObject<BigDecimal>("select real_balance from wallet")).isEqualTo(BigDecimal("10.00"))
+        flyway.migrate()
         insertRound()
         insertLedger("ROUND_STAKE", "GAME_ROUND", "-1.00")
     }
@@ -107,7 +110,7 @@ class RoundSchemaIntegrationTest @Autowired constructor(
         assertSqlState("23502") { insertRound(win = null) }
         assertSqlState("23502") { insertRound(playerId = null) }
         assertSqlState("23502") {
-            jdbc.update("insert into game_round (id, player_id, stake, total_win, created_at) values (?, ?, 1, 0, null)",
+            jdbc.update("insert into game_round (id, player_id, stake, total_win, real_stake, bonus_stake, real_win, bonus_win, created_at) values (?, ?, 1, 0, 1, 0, 0, 0, null)",
                 UUID.randomUUID(), DemoPlayer.ID)
         }
     }
@@ -125,7 +128,7 @@ class RoundSchemaIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `round ledger accepts signed money preserves uniqueness and still excludes bonus`() {
+    fun `round ledger accepts signed money preserves uniqueness and rejects unknown wallet types`() {
         val id = UUID.randomUUID()
         insertRound(id)
         insertLedger("ROUND_STAKE", "GAME_ROUND", "-1.00", referenceId = id)
@@ -133,7 +136,7 @@ class RoundSchemaIntegrationTest @Autowired constructor(
         assertThat(jdbc.queryForObject<Long>("select count(*) from ledger_entry")).isEqualTo(2L)
         assertSqlState("23505") { insertLedger("ROUND_STAKE", "GAME_ROUND", "-1.00", referenceId = id) }
         assertSqlState("23505") { insertLedger("ROUND_WIN", "GAME_ROUND", "2.00", referenceId = id) }
-        assertSqlState("23514") { insertLedger("ROUND_WIN", "GAME_ROUND", "2.00", walletType = "BONUS") }
+        assertSqlState("23514") { insertLedger("ROUND_WIN", "GAME_ROUND", "2.00", walletType = "UNKNOWN") }
         assertSqlState("22003") { insertLedger("ROUND_STAKE", "GAME_ROUND", "-100000000000000000.00") }
     }
 
@@ -161,8 +164,8 @@ class RoundSchemaIntegrationTest @Autowired constructor(
         stake: String? = "1.00",
         win: String? = "0.00",
     ) {
-        jdbc.update("insert into game_round (id, player_id, stake, total_win) values (?, ?, ?::numeric, ?::numeric)",
-            id, playerId, stake, win)
+        jdbc.update("insert into game_round (id, player_id, stake, total_win, real_stake, bonus_stake, real_win, bonus_win) values (?, ?, ?::numeric, ?::numeric, ?::numeric, 0, ?::numeric, 0)",
+            id, playerId, stake, win, stake, win)
     }
 
     private fun insertLedger(

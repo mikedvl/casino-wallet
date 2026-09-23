@@ -65,20 +65,20 @@ class DepositLedgerIntegrationTest @Autowired constructor(
         val id = createDeposit("25")
         assertState(id, "PENDING", "0.00", 0)
         assertThat(callback(id, "2500").statusCode).isEqualTo(HttpStatus.OK)
-        assertState(id, "COMPLETED", "25.00", 1)
+        assertState(id, "COMPLETED", "25.00", 2, "25.00")
         assertThat(callback(id, "2500").statusCode).isEqualTo(HttpStatus.OK)
-        assertState(id, "COMPLETED", "25.00", 1)
+        assertState(id, "COMPLETED", "25.00", 2, "25.00")
         assertError(callback(id, "2600"), HttpStatus.CONFLICT, "DEPOSIT_AMOUNT_MISMATCH")
         assertError(callback(id, "2500", "0".repeat(64)), HttpStatus.UNAUTHORIZED, "INVALID_SIGNATURE")
-        assertState(id, "COMPLETED", "25.00", 1)
+        assertState(id, "COMPLETED", "25.00", 2, "25.00")
 
         val wallet = checkNotNull(http.getForEntity<JsonNode>("/api/wallet").body)
         assertThat(wallet.path("realBalance").isTextual).isTrue()
         assertThat(wallet.path("realBalance").asText()).isEqualTo("25.00")
-        assertThat(wallet.path("bonusBalance").asText()).isEqualTo("0.00")
+        assertThat(wallet.path("bonusBalance").asText()).isEqualTo("25.00")
         val ledger = checkNotNull(http.getForEntity<JsonNode>("/api/ledger").body)
-        assertThat(ledger.path("totalElements").asLong()).isEqualTo(1L)
-        val entry = ledger.path("items").single()
+        assertThat(ledger.path("totalElements").asLong()).isEqualTo(2L)
+        val entry = ledger.path("items").single { it.path("operationType").asText() == "DEPOSIT_COMPLETED" }
         assertThat(entry.path("amount").isTextual).isTrue()
         assertThat(entry.path("amount").asText()).isEqualTo("25.00")
         assertThat(entry.path("balanceAfter").asText()).isEqualTo("25.00")
@@ -159,7 +159,7 @@ class DepositLedgerIntegrationTest @Autowired constructor(
             executor.shutdownNow()
             check(executor.awaitTermination(10, TimeUnit.SECONDS))
         }
-        assertState(id, "COMPLETED", "25.00", 1)
+        assertState(id, "COMPLETED", "25.00", 2, "25.00")
         assertReconciled()
     }
 
@@ -188,7 +188,7 @@ class DepositLedgerIntegrationTest @Autowired constructor(
         jdbc.execute("drop trigger fail_completed_deposit on deposit")
         jdbc.execute("drop function fail_completed_deposit()")
         assertThat(callback(id, "2500").statusCode).isEqualTo(HttpStatus.OK)
-        assertState(id, "COMPLETED", "25.00", 1)
+        assertState(id, "COMPLETED", "25.00", 2, "25.00")
     }
 
     @ParameterizedTest
@@ -250,7 +250,7 @@ class DepositLedgerIntegrationTest @Autowired constructor(
         assertError(post("/api/provider/deposits/callback", reformatted, sign(body)), HttpStatus.UNAUTHORIZED, "INVALID_SIGNATURE")
         assertState(id, "PENDING", "0.00", 0)
         assertThat(post("/api/provider/deposits/callback", reformatted, sign(reformatted)).statusCode).isEqualTo(HttpStatus.OK)
-        assertState(id, "COMPLETED", "25.00", 1)
+        assertState(id, "COMPLETED", "25.00", 2, "25.00")
     }
 
     @Test
@@ -275,11 +275,12 @@ class DepositLedgerIntegrationTest @Autowired constructor(
     fun `largest supported amount retains precision and a further credit rolls back`() {
         val id = createDeposit("99999999999999999.99")
         assertThat(callback(id, "9999999999999999999").statusCode).isEqualTo(HttpStatus.OK)
-        assertState(id, "COMPLETED", "99999999999999999.99", 1)
+        assertState(id, "COMPLETED", "99999999999999999.99", 2, "100.00")
         val another = createDeposit("0.01")
         assertError(callback(another, "1"), HttpStatus.CONFLICT, "WALLET_BALANCE_LIMIT")
-        assertState(another, "PENDING", "99999999999999999.99", 1)
-        val ledger = checkNotNull(http.getForEntity<JsonNode>("/api/ledger").body).path("items").single()
+        assertState(another, "PENDING", "99999999999999999.99", 2, "100.00")
+        val ledger = checkNotNull(http.getForEntity<JsonNode>("/api/ledger").body).path("items")
+            .single { it.path("operationType").asText() == "DEPOSIT_COMPLETED" }
         assertThat(ledger.path("amount").asText()).isEqualTo("99999999999999999.99")
         assertThat(ledger.path("balanceAfter").asText()).isEqualTo("99999999999999999.99")
         assertReconciled()
@@ -298,7 +299,7 @@ class DepositLedgerIntegrationTest @Autowired constructor(
             val result = context.getBean<DepositApplicationService>().complete(id, BigDecimal("25.00"))
             assertThat(result.duplicate).isTrue()
         }
-        assertState(id, "COMPLETED", "25.00", 1)
+        assertState(id, "COMPLETED", "25.00", 2, "25.00")
         assertReconciled()
     }
 
@@ -412,24 +413,27 @@ class DepositLedgerIntegrationTest @Autowired constructor(
         return HexFormat.of().formatHex(mac.doFinal(body.toByteArray(Charsets.UTF_8)))
     }
 
-    private fun assertState(id: UUID, status: String, realBalance: String, ledgerCount: Long) {
+    private fun assertState(id: UUID, status: String, realBalance: String, ledgerCount: Long, bonusBalance: String = "0.00") {
         val deposit = jdbc.queryForMap("select status, completed_at from deposit where id = ?", id)
         assertThat(deposit["status"]).isEqualTo(status)
         assertThat(deposit["completed_at"] != null).isEqualTo(status == "COMPLETED")
         assertThat(jdbc.queryForObject("select real_balance from wallet where player_id = ?", BigDecimal::class.java, DEMO_PLAYER_ID))
             .isEqualTo(BigDecimal(realBalance))
         assertThat(jdbc.queryForObject("select bonus_balance from wallet where player_id = ?", BigDecimal::class.java, DEMO_PLAYER_ID))
-            .isEqualTo(BigDecimal("0.00"))
+            .isEqualTo(BigDecimal(bonusBalance))
         assertThat(jdbc.queryForObject("select count(*) from ledger_entry where player_id = ?", Long::class.java, DEMO_PLAYER_ID))
             .isEqualTo(ledgerCount)
     }
 
     private fun assertReconciled() {
-        val ledgerTotal = jdbc.queryForObject(
-            "select coalesce(sum(amount), 0.00) from ledger_entry where player_id = ?", BigDecimal::class.java, DEMO_PLAYER_ID,
-        )
-        val balance = jdbc.queryForObject("select real_balance from wallet where player_id = ?", BigDecimal::class.java, DEMO_PLAYER_ID)
-        assertThat(ledgerTotal).isEqualByComparingTo(balance)
+        val wallet = jdbc.queryForMap("select real_balance, bonus_balance from wallet where player_id = ?", DEMO_PLAYER_ID)
+        for ((type, column) in mapOf("REAL" to "real_balance", "BONUS" to "bonus_balance")) {
+            val ledgerTotal = jdbc.queryForObject(
+                "select coalesce(sum(amount), 0.00) from ledger_entry where player_id = ? and wallet_type = ?",
+                BigDecimal::class.java, DEMO_PLAYER_ID, type,
+            )
+            assertThat(ledgerTotal).isEqualByComparingTo(wallet[column] as BigDecimal)
+        }
     }
 
     private fun assertError(response: ResponseEntity<JsonNode>, status: HttpStatus, code: String) {

@@ -1,5 +1,7 @@
 package com.example.casinowallet.deposit.application
 
+import com.example.casinowallet.bonus.domain.WelcomeBonusGrant
+import com.example.casinowallet.bonus.persistence.JdbcBonusRepository
 import com.example.casinowallet.config.DemoPlayer
 import com.example.casinowallet.deposit.domain.Deposit
 import com.example.casinowallet.deposit.domain.DepositStatus
@@ -11,6 +13,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Isolation
 import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
+import java.time.Clock
 import java.util.UUID
 
 @Service
@@ -18,6 +21,8 @@ class DepositApplicationService(
     private val deposits: JdbcDepositRepository,
     private val wallets: JdbcWalletRepository,
     private val ledger: JdbcLedgerRepository,
+    private val bonuses: JdbcBonusRepository,
+    private val clock: Clock,
 ) {
     @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = [Exception::class])
     fun create(amount: BigDecimal): Deposit {
@@ -38,12 +43,21 @@ class DepositApplicationService(
 
         val balance = wallets.creditRealBalance(playerId, deposit.amount) ?: throw WalletBalanceLimitException()
         ledger.appendDeposit(playerId, id, deposit.amount, balance)
+        // Current deposit is still PENDING; older qualifying completions also consume lifetime eligibility.
+        val grant = WelcomeBonusGrant.fromDeposit(deposit.amount, clock.instant())?.takeIf {
+            !bonuses.existsForPlayer(playerId) && !deposits.hasCompletedQualifyingDeposit(playerId)
+        }
+        if (grant != null) {
+            bonuses.insert(playerId, id, grant)
+            val bonusBalance = wallets.creditBonusBalance(playerId, grant.amount) ?: throw WalletBalanceLimitException()
+            ledger.appendWelcomeBonus(playerId, id, grant.amount, bonusBalance)
+        }
         deposits.markCompleted(id)
-        return DepositCompletion(id, duplicate = false)
+        return DepositCompletion(id, duplicate = false, bonusGranted = grant != null)
     }
 }
 
-data class DepositCompletion(val depositId: UUID, val duplicate: Boolean)
+data class DepositCompletion(val depositId: UUID, val duplicate: Boolean, val bonusGranted: Boolean = false)
 
 class DepositNotFoundException : RuntimeException()
 class DepositAmountMismatchException : RuntimeException()

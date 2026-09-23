@@ -4,11 +4,11 @@ A small casino wallet assignment built with Kotlin, Spring Boot, PostgreSQL and 
 
 The project is implemented in small, reviewable vertical slices with a green build required at the end of every stage.
 
-> **Current status:** Stage 4 — Atomic Game Rounds and Concurrency.
+> **Current status:** Stage 5 — Welcome Bonus and Mixed-Funds Rounds.
 >
-> Signed provider callbacks complete deposits idempotently. Real-money game rounds debit a stake and settle a deterministic payout in one PostgreSQL transaction, with wallet row locking and immutable ledger history. Angular displays the authoritative wallet balances in EUR.
+> Signed provider callbacks complete deposits idempotently and grant one welcome bonus on the first qualifying completion. Rounds use real money first, split payouts proportionally and track wagering in one PostgreSQL transaction, with wallet row locking and immutable ledger history. Angular displays the authoritative wallet balances in EUR.
 >
-> Bonus lifecycle, mixed funds, wagering, deposit/round/ledger UI and translations are not implemented yet.
+> Bonus completion, expiration processing, deposit/round/ledger UI and translations belong to Stage 6 and are not implemented yet.
 
 See:
 
@@ -88,7 +88,7 @@ Both values are decimal strings with exactly two fractional digits. Angular pres
 
 Flyway runs on backend startup in both DEV and DEMO. `V1__create_wallet.sql` creates `wallet` with `player_id UUID PRIMARY KEY` and two `NUMERIC(19,2) NOT NULL DEFAULT 0.00` balances, each protected by a nonnegative `CHECK`. `V2__seed_demo_wallet.sql` inserts one demo wallet for `00000000-0000-0000-0000-000000000001` with `0.00 / 0.00`. Applied migrations are recorded in `flyway_schema_history`; restarting does not reseed or reset balances.
 
-The read path is controller → application service → Spring JDBC → PostgreSQL. Completed deposits, round stakes and round payouts update the real balance; the bonus balance is unchanged. Reload the page to read the latest committed balances.
+The read path is controller → application service → Spring JDBC → PostgreSQL. Deposits credit real money; a qualifying welcome grant credits bonus money. Rounds can change both balances. Reload the page to read the latest committed balances.
 
 ---
 
@@ -155,7 +155,17 @@ PY
 
 HTTP `200` returns `{"depositId":"<UUID>","status":"COMPLETED"}`. Repeating the correctly signed callback with the matching amount returns the same success without another credit or ledger row, including after a backend restart.
 
-Completion runs in one application-service `READ_COMMITTED` transaction. An unlocked lookup discovers the owner, then rows are locked **wallet → deposit** with `SELECT ... FOR UPDATE`. The locked amount and status are checked again. The wallet credit, ledger insert and completion timestamp commit or roll back together. The credited balance comes from `UPDATE ... RETURNING`; success is logged and returned only after commit. Idempotency uses PostgreSQL state and uniqueness, with no cache or in-memory keys.
+Completion runs in one application-service `READ_COMMITTED` transaction. An unlocked lookup discovers the owner, then rows are locked **wallet → deposit** with `SELECT ... FOR UPDATE`. The locked amount and status are checked again. The real credit and ledger entry, any welcome bonus metadata/credit/ledger entry, and the deposit completion timestamp commit or roll back together. Credited balances come from `UPDATE ... RETURNING`; success is logged and returned only after commit. Idempotency uses PostgreSQL state and uniqueness, with no cache or in-memory keys.
+
+## Welcome bonus
+
+The first qualifying **completed** deposit of at least EUR `20.00` grants `min(deposit, 100.00)` once per player. Earlier deposits of `10.00` or `19.99` do not consume eligibility. A clean `20.00` completion leaves `20.00` real and `20.00` bonus; a `100.01` completion grants `100.00` bonus. Creating a pending deposit grants nothing.
+
+While holding the wallet lock, the callback checks for an existing bonus and for any earlier completed deposit of at least `20.00`; the current deposit is still pending. This also prevents retroactive grants for qualifying deposits completed before V5. Concurrent qualifying callbacks both credit real money, but only whichever transaction completes first can grant the bonus. Unique player and source-deposit constraints reinforce the one-time grant.
+
+The `bonus` table stores the source deposit, initial amount, wagering target (`initial_amount × 20`), progress (initially `0.00`), `ACTIVE` status and timestamps. An injected UTC `Clock` sets `granted_at`; `expires_at` is exactly 168 hours later. Current bonus money lives only in `wallet.bonus_balance`. Each grant appends one positive `WELCOME_BONUS_GRANTED / BONUS / DEPOSIT` entry referencing the source deposit and the authoritative bonus balance after credit.
+
+Stage 5 stores lifetime metadata and advances wagering only. It does **not** expire, forfeit, complete or convert bonuses. Progress may exceed its target while status remains `ACTIVE` and the stake limit continues to apply. Those lifecycle transitions belong to Stage 6.
 
 Errors use a safe Problem Detail response with a stable `code` and propagated `X-Request-ID`:
 
@@ -177,17 +187,17 @@ Errors use a safe Problem Detail response with a stable `code` and propagated `X
 curl --fail-with-body 'http://localhost:4200/api/ledger?page=0&size=20'
 ```
 
-The response contains `items`, `page`, `size`, `totalElements` and `totalPages`. Each item contains `id`, `walletType` (`REAL`), `operationType` (`DEPOSIT_COMPLETED`, `ROUND_STAKE` or `ROUND_WIN`), `amount`, `balanceAfter`, `referenceType` (`DEPOSIT` or `GAME_ROUND`), `referenceId` and UTC `createdAt`. Both money fields are two-decimal strings. Round stake amounts are negative, for example `"-8.00"`; deposits and round payouts are positive.
+The response contains `items`, `page`, `size`, `totalElements` and `totalPages`. Each item contains `id`, `walletType` (`REAL` or `BONUS`), `operationType` (`DEPOSIT_COMPLETED`, `WELCOME_BONUS_GRANTED`, `ROUND_STAKE` or `ROUND_WIN`), `amount`, `balanceAfter`, `referenceType` (`DEPOSIT` or `GAME_ROUND`), `referenceId` and UTC `createdAt`. Both money fields are two-decimal strings. Round stake amounts are negative, for example `"-8.00"`; deposits, grants and round payouts are positive.
 
 Pages start at zero; the default size is 20 and the maximum is 100. Empty/out-of-range pages return an empty `items` array with the actual totals. SQL sorts by `created_at DESC, id DESC`, backed by a matching player/history index. Items and totals use one read-only PostgreSQL snapshot per request; separate page requests can naturally observe newly committed deposits or rounds.
 
 ---
 
-# Atomic Real-Money Rounds API
+# Atomic Rounds API
 
 `POST /api/rounds/play` plays and settles one synchronous round for the same seeded demo player. Both input amounts must be plain decimal **strings** with at most two fractional digits and a maximum of `99999999999999999.99`. Stake must be positive; total payout may be zero. `"8"` normalizes to `"8.00"`; values such as `"8.001"`, negative amounts, exponents and JSON numbers are rejected without rounding.
 
-With a real balance of `10.00`, funded through the deposit/callback API:
+With a real balance of `10.00` and no active bonus, funded through the deposit/callback API:
 
 ```bash
 curl --fail-with-body -i http://localhost:4200/api/rounds/play \
@@ -207,29 +217,33 @@ HTTP `200`:
 The application service owns one `READ_COMMITTED` transaction:
 
 1. Lock the wallet and read its balances with `SELECT ... FOR UPDATE`.
-2. Check that the current real balance covers the complete stake.
-3. Debit real money with `UPDATE ... RETURNING real_balance` and append `ROUND_STAKE` with a negative amount and the resulting `balance_after`.
-4. Insert the `game_round` with its stake and total payout.
-5. For a positive payout, credit real money with `UPDATE ... RETURNING real_balance` and append `ROUND_WIN` with a positive amount and its resulting `balance_after`.
-6. Commit before logging or returning success.
+2. Load active bonus metadata. If active, require stake ≤ `5.00` even when real money covers the entire stake; check combined funds. Without an active bonus, check real funds only and apply no bonus stake limit.
+3. Allocate real stake first and bonus stake for the remainder. Debit both balances in one `UPDATE ... RETURNING real_balance, bonus_balance`; append a negative `ROUND_STAKE` entry for each non-zero portion.
+4. Insert `game_round` with the stake, total payout and all four actual allocation amounts.
+5. For a positive payout, credit both win portions in one guarded `UPDATE ... RETURNING` and append a positive `ROUND_WIN` for each non-zero portion.
+6. If a bonus is active, increment wagering progress by the **full stake**, including fully real-funded stakes.
+7. Commit before logging or returning success.
 
-A zero payout produces no credit and no `ROUND_WIN` row. For the example above the two round ledger entries are `-4.00 / balanceAfter 6.00` and `+10.00 / balanceAfter 16.00`. Wallet, round and both ledger entries commit or roll back together, including on commit-time failure. Rounds lock only the wallet; deposit callbacks retain their existing **wallet → deposit** lock order. The ledger remains audit history; current balances are always read from the wallet.
+A zero payout produces no credit and no `ROUND_WIN` row; zero stake/win portions also produce no ledger entries. For the example above the two round ledger entries are `-4.00 / balanceAfter 6.00` and `+10.00 / balanceAfter 16.00`. Wallet, round, wagering progress and ledger entries commit or roll back together, including on commit-time failure. All bonus mutations first hold the wallet lock, which serializes metadata access and progress updates. Deposit callbacks retain their existing **wallet → deposit** lock order. The ledger remains audit history; current balances are always read from the wallet.
+
+For mixed stakes, `realWin = round(totalWin × realStake / stake, 2, HALF_UP)` and `bonusWin = totalWin - realWin`. Only the real portion is rounded; the bonus gets the exact remainder. A `4.00` stake allocated as `1.00` real + `3.00` bonus with a `10.00` payout returns `2.50` real + `7.50` bonus. A `1.00 / 3.00` real fraction of `10.00` returns `3.33` real + `6.67` bonus, without losing a cent. The request and response formats above are unchanged; allocation is server-owned, and client-supplied `realStake`, `bonusStake`, `realWin` or `bonusWin` fields are rejected.
 
 | Status | Code | Result |
 |---|---|---|
 | 400 | `INVALID_ROUND_AMOUNT` | Invalid stake or totalWin; no financial writes |
 | 400 | `INVALID_REQUEST` | Malformed JSON/request; no financial writes |
-| 409 | `INSUFFICIENT_FUNDS` | Real balance cannot cover stake, even if the proposed payout would cover it; no round, ledger entry or balance change |
+| 409 | `INSUFFICIENT_FUNDS` | Available funds cannot cover stake before payout; no financial or progress changes |
+| 409 | `MAX_BET_EXCEEDED` | Stake exceeds `5.00` while a bonus is active, including fully real-funded bets; no financial or progress changes |
 | 409 | `WALLET_BALANCE_LIMIT` | Payout would overflow `NUMERIC(19,2)`; the complete round rolls back |
 | 500 | `INTERNAL_ERROR` | Technical failure; the complete round rolls back and internal details remain private |
 
-`V4__create_game_rounds.sql` extends the schema without changing V1–V3. `game_round` contains only `id UUID PRIMARY KEY`, `player_id UUID NOT NULL REFERENCES wallet`, `stake NUMERIC(19,2) NOT NULL`, `total_win NUMERIC(19,2) NOT NULL` and `created_at TIMESTAMPTZ NOT NULL`. Database checks require positive stake and nonnegative payout within the money range. There is no pending/settled state for synchronous rounds.
+V1–V4 remain immutable schema history. `V5__welcome_bonus_and_mixed_rounds.sql` adds bonus metadata and extends `game_round` with required `NUMERIC(19,2)` fields `real_stake`, `bonus_stake`, `real_win` and `bonus_win`. Existing Stage 4 rows are backfilled as real-only (`real_stake = stake`, `real_win = total_win`, both bonus portions zero) before enforcing non-null and allocation-sum constraints. Historical ledger rows are unchanged. The original UUIDs, wallet foreign key, stake, payout and creation timestamp remain; no round status machinery is added.
 
-V4 extends the existing ledger constraints: deposit credits reference `DEPOSIT` and remain positive; `ROUND_STAKE` and `ROUND_WIN` reference `GAME_ROUND` and must be negative and positive respectively. Zero entries and `BONUS` wallet type remain forbidden. The existing unique business-operation key, balance constraints and append-only trigger are preserved; ledger `UPDATE`, `DELETE` and `TRUNCATE` remain rejected.
+V5 extends ledger constraints to `REAL` and `BONUS`: positive deposit credits require `REAL / DEPOSIT`, positive welcome grants require `BONUS / DEPOSIT`, and signed round entries require `GAME_ROUND`. Stakes must be negative and wins positive. Zero amounts remain forbidden. The unique business-operation key includes wallet type, allowing each round's real and bonus portions exactly once per operation. Balance constraints and the append-only trigger remain intact; ledger `UPDATE`, `DELETE` and `TRUNCATE` remain rejected.
 
 PostgreSQL integration tests fund the wallet through signed deposits and prove that two concurrent `8.00` losing bets against `10.00` produce exactly one success and one `INSUFFICIENT_FUNDS` response, leaving `2.00`, one round and one stake entry. A controlled transaction holds the wallet row lock; bounded polling follows `pg_blocking_pids` from its known backend PID to prove that both requests actually wait in PostgreSQL. No SQL-text matching or timing-only concurrency proof is used. Tests also verify rollback and `sum(REAL ledger amounts) = wallet.real_balance`.
 
-Stage 4 uses real money only: the entire stake and payout belong to real balance. Bonus handling, the active-bonus EUR `5.00` restriction and mixed real/bonus allocation belong to Stage 5 and are not implemented. The Angular round form belongs to the later frontend stage; the existing wallet page continues to display backend balances.
+Stage 5 tests also prove concurrent qualifying deposits grant once, concurrent active-bonus stakes do not lose wagering progress, mixed rounds roll back atomically, and both `sum(REAL ledger amounts)` and `sum(BONUS ledger amounts)` reconcile independently with the wallet. Contention is proved with the same PostgreSQL blocking probe. The Angular forms and bonus-progress view belong to Stage 6; the existing wallet page displays both backend balances after refresh.
 
 ---
 
@@ -904,13 +918,15 @@ frontend  -> healthy
 
 Backend readiness verifies real PostgreSQL connectivity.
 
-Both wallet requests must return HTTP `200`, decimal strings (`0.00 / 0.00` on a fresh database), and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database V1–V4 are applied. Existing volumes retain their balances and history.
+Both wallet requests must return HTTP `200`, decimal strings (`0.00 / 0.00` on a fresh database), and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database V1–V5 are applied. Existing volumes retain their balances and history.
 
 Before shutting down the stack, also exercise the deposit examples above: creation leaves balances/history unchanged; the signed callback credits exactly once; a duplicate remains successful; an invalid signature returns `401`; a freshly signed mismatched amount returns `409`. Verify the resulting wallet and ledger through Nginx, restart the backend and retry the matching callback to verify durable idempotency. These operations intentionally persist demo history; do not delete the PostgreSQL volume to reset it. Automated financial/schema tests use disposable Testcontainers databases instead.
 
-For the Stage 4 financial smoke on a fresh wallet, create a `10.00` deposit and verify that the pending deposit leaves the wallet at `0.00`. Complete it with a signed `amountCents: 1000` callback, then verify `10.00` and one deposit ledger entry. Play `{"stake":"8.00","totalWin":"0.00"}` through Nginx and verify HTTP `200`, wallet `2.00 / 0.00`, one `ROUND_STAKE` entry of `-8.00` with `balanceAfter: "2.00"`, and no `ROUND_WIN`. Check the supplied `X-Request-ID` on wallet, round and ledger responses and confirm that all services remain healthy. If the volume already contains financial history, record its reconciled opening balance and account for these new mutations; never prepare the scenario by editing wallet balances directly. The mandatory simultaneous `8.00 + 8.00` contention proof runs in automated PostgreSQL integration tests.
+For the Stage 4 financial smoke on a fresh wallet, create a `10.00` deposit and verify that the pending deposit leaves the wallet at `0.00`. Complete it with a signed `amountCents: 1000` callback, then verify `10.00` and one deposit ledger entry. Play `{"stake":"8.00","totalWin":"0.00"}` through Nginx and verify HTTP `200`, wallet `2.00 / 0.00`, one `ROUND_STAKE` entry of `-8.00` with `balanceAfter: "2.00"`, and no `ROUND_WIN`. Check the supplied `X-Request-ID` on wallet, round and ledger responses and confirm that all services remain healthy. This example requires no active bonus; with an active bonus use legal stakes in the Stage 5 smoke below. If the volume already contains financial history, record its reconciled opening balance and account for these new mutations; never prepare the scenario by editing wallet balances directly. The mandatory simultaneous `8.00 + 8.00` contention proof runs in automated PostgreSQL integration tests.
 
 Liveness remains independent from PostgreSQL so the JVM process can remain alive and recover from a temporary database outage.
+
+For a Stage 5 smoke with no prior qualifying completion, complete deposits of `19.99` and `20.00`. On a fresh wallet this produces `39.99 / 20.00`, one active bonus with target `400.00` and zero progress. Reject `5.01`, verifying unchanged state, then use legal losing stakes of at most `5.00` to reduce real funds and exercise a mixed winning round. Verify the persisted allocation, both wallet types in `/api/ledger`, full-stake wagering progress, request IDs and independent balance reconciliation. Account for any existing reconciled balance; do not edit wallet balances or delete the demo volume to prepare this scenario. Completion and expiration are deliberately absent in Stage 5.
 
 ---
 
@@ -1017,7 +1033,7 @@ PostgreSQL
 
 # Reliability Strategy
 
-Stage 4 implements real-balance deposit credits and synchronous real-money rounds. Financial writes follow these rules:
+Stage 5 implements real deposit credits, one-time welcome grants and synchronous real/mixed-funds rounds. Financial writes follow these rules:
 
 - PostgreSQL is the only durable transactional system.
 - Each balance-changing use case executes in one application-service transaction.
@@ -1056,13 +1072,13 @@ The wallet has a primary key, required balances and nonnegative checks. Deposit/
 
 Financial state uses strong consistency.
 
-PostgreSQL is the single source of truth for real and bonus balances, deposit state and durable callback idempotency. Wagering belongs to a later stage.
+PostgreSQL is the single source of truth for real and bonus balances, deposits, bonus metadata, wagering progress and durable callback idempotency.
 
-The `wallet` table contains the current real and bonus balances. Deposit completion, round stakes and round payouts affect real balance only.
+The `wallet` table contains the current real and bonus balances. Welcome grants and mixed-funds rounds update bonus money; all financial changes have matching ledger entries in the same transaction.
 
 The ledger is append-only history written in the same transaction as each balance change; the wallet remains the authoritative current state.
 
-Bonus metadata will not duplicate the mutable current bonus balance.
+Bonus metadata stores the original grant and wagering state without duplicating the mutable current bonus balance.
 
 The frontend treats backend responses as authoritative and does not perform authoritative financial calculations.
 

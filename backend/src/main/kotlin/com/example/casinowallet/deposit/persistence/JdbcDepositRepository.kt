@@ -42,4 +42,10 @@ class JdbcDepositRepository(private val jdbc: NamedParameterJdbcTemplate) {
             mapOf("id" to id),
         ) == 1) { "Expected one pending deposit" }
     }
+
+    fun hasCompletedQualifyingDeposit(playerId: UUID): Boolean = checkNotNull(jdbc.queryForObject(
+        // language=PostgreSQL
+        "select exists(select 1 from deposit where player_id = :playerId and status = 'COMPLETED' and amount >= 20.00)",
+        mapOf("playerId" to playerId), Boolean::class.java,
+    ))
 }

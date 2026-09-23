@@ -107,11 +107,11 @@ class RoundIntegrationTest @Autowired constructor(
 
     @Test
     fun `every play is a new round without invented idempotency`() {
-        fund("20.00")
-        val first = assertSuccess(play("8.00", "0.00"), "8.00", "0.00", "12.00")
-        val second = assertSuccess(play("8.00", "0.00"), "8.00", "0.00", "4.00")
+        fund("19.99")
+        val first = assertSuccess(play("8.00", "0.00"), "8.00", "0.00", "11.99")
+        val second = assertSuccess(play("8.00", "0.00"), "8.00", "0.00", "3.99")
         assertThat(first).isNotEqualTo(second)
-        assertState("4.00", 2, 2)
+        assertState("3.99", 2, 2)
     }
 
     @ParameterizedTest
@@ -147,7 +147,7 @@ class RoundIntegrationTest @Autowired constructor(
 
     @Test
     fun `full numeric range and cents remain exact across stake and payout`() {
-        fund("99999999999999999.99")
+        fundHistoricalMaximumDeposit()
         val id = assertSuccess(play("99999999999999999.99", "99999999999999999.99"),
             "99999999999999999.99", "99999999999999999.99", "99999999999999999.99")
         assertRoundLedger(id, listOf("ROUND_STAKE", "ROUND_WIN"),
@@ -157,7 +157,7 @@ class RoundIntegrationTest @Autowired constructor(
 
     @Test
     fun `payout overflowing the wallet rolls back stake round and ledger`() {
-        fund("99999999999999999.99")
+        fundHistoricalMaximumDeposit()
         assertError(play("0.01", "0.02"), HttpStatus.CONFLICT, "WALLET_BALANCE_LIMIT")
         assertState("99999999999999999.99", 0, 0)
     }
@@ -227,6 +227,21 @@ class RoundIntegrationTest @Autowired constructor(
         assertRound(id, "8.00", "0.00")
         assertRoundLedger(id, listOf("ROUND_STAKE"), listOf("-8.00"), listOf("2.00"))
         assertState("2.00", 1, 1)
+    }
+
+    private fun fundHistoricalMaximumDeposit() {
+        // Preserve Stage 4's full-range, no-bonus regression with reconciled history created before V5.
+        val amount = "99999999999999999.99"
+        flyway.clean()
+        Flyway.configure().dataSource(dataSource).target("4").load().migrate()
+        val id = UUID.randomUUID()
+        jdbc.update("insert into deposit (id, player_id, amount, status, completed_at) values (?, ?, ?::numeric, 'COMPLETED', clock_timestamp())",
+            id, DemoPlayer.ID, amount)
+        jdbc.update("insert into ledger_entry (id, player_id, wallet_type, operation_type, amount, balance_after, reference_type, reference_id) values (?, ?, 'REAL', 'DEPOSIT_COMPLETED', ?::numeric, ?::numeric, 'DEPOSIT', ?)",
+            UUID.randomUUID(), DemoPlayer.ID, amount, amount, id)
+        jdbc.update("update wallet set real_balance = ?::numeric where player_id = ?", amount, DemoPlayer.ID)
+        flyway.migrate()
+        assertState(amount, 0, 0)
     }
 
     private fun fund(amount: String) {

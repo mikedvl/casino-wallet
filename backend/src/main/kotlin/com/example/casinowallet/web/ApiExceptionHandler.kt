@@ -4,6 +4,7 @@ import com.example.casinowallet.deposit.application.DepositAmountMismatchExcepti
 import com.example.casinowallet.deposit.application.DepositNotFoundException
 import com.example.casinowallet.ledger.application.InvalidLedgerPageException
 import com.example.casinowallet.round.application.InsufficientFundsException
+import com.example.casinowallet.round.application.MaxBetExceededException
 import com.example.casinowallet.wallet.application.WalletBalanceLimitException
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
@@ -42,7 +43,11 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
 
     @ExceptionHandler(InsufficientFundsException::class)
     fun insufficientFunds(): ProblemDetail =
-        problem(HttpStatus.CONFLICT, "INSUFFICIENT_FUNDS", "Insufficient real balance for the stake")
+        problem(HttpStatus.CONFLICT, "INSUFFICIENT_FUNDS", "Insufficient available balance for the stake")
+
+    @ExceptionHandler(MaxBetExceededException::class)
+    fun maxBetExceeded(): ProblemDetail =
+        problem(HttpStatus.CONFLICT, "MAX_BET_EXCEEDED", "Stake cannot exceed EUR 5.00 while a bonus is active")
 
     @ExceptionHandler(Exception::class)
     fun unexpected(exception: Exception): ProblemDetail {
