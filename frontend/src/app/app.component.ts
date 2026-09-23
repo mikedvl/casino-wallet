@@ -5,11 +5,6 @@ import { WalletPageComponent } from './wallet/wallet-page.component';
   selector: 'app-root',
   standalone: true,
   imports: [WalletPageComponent],
-  template: `
-    <main>
-      <h1>Casino Wallet</h1>
-      <app-wallet-page />
-    </main>
-  `,
+  template: '<app-wallet-page />',
 })
 export class AppComponent {}

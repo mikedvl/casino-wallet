@@ -139,7 +139,8 @@ class WalletReadIntegrationTest @Autowired constructor(
         assertThat(response.headers.getFirst("X-Request-ID")).isEqualTo("wallet-read-test")
         val wallet = checkNotNull(response.body) { "Expected a wallet response body" }
         assertThat(wallet.fieldNames().asSequence().toList())
-            .containsExactlyInAnyOrder("realBalance", "bonusBalance")
+            .containsExactlyInAnyOrder("realBalance", "bonusBalance", "bonus")
+        assertThat(wallet.path("bonus").isNull).isTrue()
         for (balance in listOf("realBalance", "bonusBalance")) {
             assertThat(wallet.path(balance).isTextual).isTrue()
             assertThat(wallet.path(balance).asText()).isEqualTo("0.00")

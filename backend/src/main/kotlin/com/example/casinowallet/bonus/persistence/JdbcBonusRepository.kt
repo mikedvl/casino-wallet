@@ -1,10 +1,13 @@
 package com.example.casinowallet.bonus.persistence
 
 import com.example.casinowallet.bonus.domain.WelcomeBonusGrant
+import com.example.casinowallet.bonus.domain.WelcomeBonus
+import com.example.casinowallet.bonus.domain.BonusStatus
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import java.math.BigDecimal
 import java.time.ZoneOffset
+import java.time.OffsetDateTime
 import java.util.UUID
 
 @Repository
@@ -15,11 +18,24 @@ class JdbcBonusRepository(private val jdbc: NamedParameterJdbcTemplate) {
         mapOf("playerId" to playerId), Boolean::class.java,
     ))
 
-    fun findActiveId(playerId: UUID): UUID? = jdbc.query(
+    fun findByPlayerId(playerId: UUID): WelcomeBonus? = jdbc.query(
         // language=PostgreSQL
-        "select id from bonus where player_id = :playerId and status = 'ACTIVE'",
+        "select id, initial_amount, wagering_progress, wagering_target, status, expires_at from bonus where player_id = :playerId",
         mapOf("playerId" to playerId),
-    ) { row, _ -> row.getObject("id", UUID::class.java) }.singleOrNull()
+    ) { row, _ ->
+        WelcomeBonus(row.getObject("id", UUID::class.java), row.getBigDecimal("initial_amount"),
+            row.getBigDecimal("wagering_progress"), row.getBigDecimal("wagering_target"),
+            BonusStatus.valueOf(row.getString("status")), row.getObject("expires_at", OffsetDateTime::class.java).toInstant())
+    }.singleOrNull()
+
+    fun finish(id: UUID, status: BonusStatus) {
+        require(status != BonusStatus.ACTIVE)
+        check(jdbc.update(
+            // language=PostgreSQL
+            "update bonus set status = :status where id = :id and status = 'ACTIVE'",
+            mapOf("id" to id, "status" to status.name),
+        ) == 1) { "Expected one active bonus under the wallet lock" }
+    }
 
     fun insert(playerId: UUID, depositId: UUID, grant: WelcomeBonusGrant) {
         jdbc.update(

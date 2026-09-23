@@ -1,6 +1,9 @@
 package com.example.casinowallet.deposit.web
 
 import com.example.casinowallet.deposit.application.DepositApplicationService
+import com.example.casinowallet.deposit.application.DepositCompletion
+import com.example.casinowallet.deposit.application.DepositBalanceLimit
+import com.example.casinowallet.wallet.application.WalletBalanceLimitException
 import com.example.casinowallet.deposit.domain.DepositStatus
 import com.example.casinowallet.web.ApiRequestException
 import org.slf4j.LoggerFactory
@@ -29,7 +32,10 @@ class ProviderCallbackController(
             throw ApiRequestException(HttpStatus.UNAUTHORIZED, "INVALID_SIGNATURE", "Invalid provider signature")
         }
         val callback = parser.parseCallback(rawBody)
-        val result = service.complete(callback.depositId, callback.amount)
+        val result = when (val outcome = service.complete(callback.depositId, callback.amount)) {
+            is DepositCompletion -> outcome
+            DepositBalanceLimit -> throw WalletBalanceLimitException()
+        }
         // The transactional service proxy has committed before a success is logged or returned.
         log.info("event=deposit_callback_completed deposit_id={} duplicate={}", result.depositId, result.duplicate)
         if (result.bonusGranted) log.info("event=welcome_bonus_granted deposit_id={}", result.depositId)

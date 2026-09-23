@@ -44,7 +44,7 @@ class BonusSchemaIntegrationTest @Autowired constructor(
     @Test
     fun `clean migrations define bonus metadata without a duplicate balance`() {
         flyway.validate()
-        assertThat(flyway.info().applied().map { it.version.toString() }).containsExactly("1", "2", "3", "4", "5")
+        assertThat(flyway.info().applied().map { it.version.toString() }).containsExactly("1", "2", "3", "4", "5", "6")
         assertThat(flyway.migrate().migrationsExecuted).isZero()
         val columns = jdbc.queryForList(
             // language=PostgreSQL
@@ -89,8 +89,9 @@ class BonusSchemaIntegrationTest @Autowired constructor(
         val originalRound = jdbc.queryForMap("select * from game_round")
         val originalLedger = jdbc.queryForList("select * from ledger_entry order by id")
 
-        assertThat(flyway.migrate().migrationsExecuted).isEqualTo(1)
-        flyway.validate()
+        val stage5 = Flyway.configure().dataSource(dataSource).target("5").load()
+        assertThat(stage5.migrate().migrationsExecuted).isEqualTo(1)
+        stage5.validate()
         assertThat(jdbc.queryForList("select version, checksum from flyway_schema_history where version in ('1', '2', '3', '4') order by installed_rank"))
             .isEqualTo(history)
         val migrated = jdbc.queryForMap("select * from game_round")
@@ -107,7 +108,7 @@ class BonusSchemaIntegrationTest @Autowired constructor(
 
     @ParameterizedTest
     @CsvSource("initial, 0", "initial, -0.01", "initial, 100.01", "initial, NaN", "target, 0", "target, 399.99",
-        "target, NaN", "progress, -0.01", "progress, NaN", "status, COMPLETED", "status, EXPIRED", "status, UNKNOWN",
+        "target, NaN", "progress, -0.01", "progress, NaN", "status, PENDING", "status, REVOKED", "status, UNKNOWN",
         "expires, 2026-01-01T00:00:00Z", "expires, 2025-12-31T23:59:59Z")
     fun `bonus checks reject invalid amounts targets progress status and timestamps`(field: String, value: String) {
         val overrides = if (field == "initial") {

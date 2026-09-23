@@ -17,7 +17,7 @@ describe('WalletApiService', () => {
   afterEach(() => http.verify());
 
   it('gets the wallet from the relative API URL and preserves decimal strings', () => {
-    const expected: WalletSummary = { realBalance: '9007199254740993.01', bonusBalance: '0.00' };
+    const expected: WalletSummary = { realBalance: '9007199254740993.01', bonusBalance: '0.00', bonus: null };
     let received: WalletSummary | undefined;
 
     TestBed.inject(WalletApiService).getWallet().subscribe(wallet => {

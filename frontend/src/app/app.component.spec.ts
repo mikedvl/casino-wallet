@@ -26,7 +26,8 @@ describe('AppComponent', () => {
 
     const request = http.expectOne('/api/wallet');
     expect(request.request.method).toBe('GET');
-    request.flush({ realBalance: '99999999999999999.99', bonusBalance: '12.30' });
+    request.flush({ realBalance: '99999999999999999.99', bonusBalance: '12.30', bonus: null });
+    http.expectOne('/api/ledger?page=0&size=10').flush({ items: [], page: 0, size: 10, totalElements: 0, totalPages: 0 });
     fixture.detectChanges();
 
     expect(element.textContent).toContain('Real balance');

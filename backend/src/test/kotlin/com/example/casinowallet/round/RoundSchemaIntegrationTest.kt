@@ -42,7 +42,7 @@ class RoundSchemaIntegrationTest @Autowired constructor(
     @Test
     fun `clean migrations define only the current round fields with exact money and required types`() {
         flyway.validate()
-        assertThat(flyway.info().applied().map { it.version.toString() }).containsExactly("1", "2", "3", "4", "5")
+        assertThat(flyway.info().applied().map { it.version.toString() }).containsExactly("1", "2", "3", "4", "5", "6")
         assertThat(flyway.migrate().migrationsExecuted).isZero()
         val columns = jdbc.queryForList(
             // language=PostgreSQL

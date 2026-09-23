@@ -42,6 +42,32 @@ class JdbcLedgerRepository(private val jdbc: NamedParameterJdbcTemplate) {
     fun appendRoundWin(playerId: UUID, roundId: UUID, walletType: WalletType, win: BigDecimal, balanceAfter: BigDecimal) =
         appendRound(playerId, roundId, walletType, "ROUND_WIN", win, balanceAfter)
 
+    fun appendBonusConversion(playerId: UUID, bonusId: UUID, amount: BigDecimal, realBalanceAfter: BigDecimal) {
+        jdbc.update(
+            // language=PostgreSQL
+            """
+            insert into ledger_entry
+                (id, player_id, wallet_type, operation_type, amount, balance_after, reference_type, reference_id)
+            values (:bonusEntryId, :playerId, 'BONUS', 'BONUS_CONVERTED', -:amount, 0.00, 'BONUS', :bonusId),
+                   (:realEntryId, :playerId, 'REAL', 'BONUS_CONVERTED', :amount, :balanceAfter, 'BONUS', :bonusId)
+            """.trimIndent(),
+            mapOf("bonusEntryId" to UUID.randomUUID(), "realEntryId" to UUID.randomUUID(), "playerId" to playerId,
+                "bonusId" to bonusId, "amount" to amount, "balanceAfter" to realBalanceAfter),
+        )
+    }
+
+    fun appendBonusForfeiture(playerId: UUID, bonusId: UUID, amount: BigDecimal) {
+        jdbc.update(
+            // language=PostgreSQL
+            """
+            insert into ledger_entry
+                (id, player_id, wallet_type, operation_type, amount, balance_after, reference_type, reference_id)
+            values (:id, :playerId, 'BONUS', 'BONUS_FORFEITED', -:amount, 0.00, 'BONUS', :bonusId)
+            """.trimIndent(),
+            mapOf("id" to UUID.randomUUID(), "playerId" to playerId, "bonusId" to bonusId, "amount" to amount),
+        )
+    }
+
     private fun appendRound(
         playerId: UUID, roundId: UUID, walletType: WalletType, operation: String, amount: BigDecimal, balanceAfter: BigDecimal,
     ) {

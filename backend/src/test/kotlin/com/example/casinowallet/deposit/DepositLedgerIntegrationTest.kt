@@ -2,6 +2,7 @@ package com.example.casinowallet.deposit
 
 import com.example.casinowallet.CasinoWalletApplication
 import com.example.casinowallet.deposit.application.DepositApplicationService
+import com.example.casinowallet.deposit.application.DepositCompletion
 import com.example.casinowallet.support.PostgresLockProbe
 import com.fasterxml.jackson.databind.JsonNode
 import org.assertj.core.api.Assertions.assertThat
@@ -297,7 +298,7 @@ class DepositLedgerIntegrationTest @Autowired constructor(
             "--payment.provider.hmac-secret=integration-test-secret",
         ).use { context ->
             val result = context.getBean<DepositApplicationService>().complete(id, BigDecimal("25.00"))
-            assertThat(result.duplicate).isTrue()
+            assertThat(result).isInstanceOfSatisfying(DepositCompletion::class.java) { assertThat(it.duplicate).isTrue() }
         }
         assertState(id, "COMPLETED", "25.00", 2, "25.00")
         assertReconciled()

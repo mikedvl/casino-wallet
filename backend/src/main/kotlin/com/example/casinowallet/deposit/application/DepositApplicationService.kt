@@ -1,6 +1,7 @@
 package com.example.casinowallet.deposit.application
 
 import com.example.casinowallet.bonus.domain.WelcomeBonusGrant
+import com.example.casinowallet.bonus.application.BonusLifecycle
 import com.example.casinowallet.bonus.persistence.JdbcBonusRepository
 import com.example.casinowallet.config.DemoPlayer
 import com.example.casinowallet.deposit.domain.Deposit
@@ -8,6 +9,7 @@ import com.example.casinowallet.deposit.domain.DepositStatus
 import com.example.casinowallet.deposit.persistence.JdbcDepositRepository
 import com.example.casinowallet.ledger.persistence.JdbcLedgerRepository
 import com.example.casinowallet.wallet.application.WalletBalanceLimitException
+import com.example.casinowallet.wallet.domain.WalletSummary
 import com.example.casinowallet.wallet.persistence.JdbcWalletRepository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Isolation
@@ -23,6 +25,7 @@ class DepositApplicationService(
     private val ledger: JdbcLedgerRepository,
     private val bonuses: JdbcBonusRepository,
     private val clock: Clock,
+    private val lifecycle: BonusLifecycle,
 ) {
     @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = [Exception::class])
     fun create(amount: BigDecimal): Deposit {
@@ -32,14 +35,22 @@ class DepositApplicationService(
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = [Exception::class])
-    fun complete(id: UUID, amount: BigDecimal): DepositCompletion {
+    fun complete(id: UUID, amount: BigDecimal): DepositOutcome = completeLocked(id, amount)
+
+    @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = [Exception::class])
+    fun completeDemo(id: UUID): DepositOutcome = completeLocked(id, null)
+
+    private fun completeLocked(id: UUID, expectedAmount: BigDecimal?): DepositOutcome {
         // The initial lookup only discovers the owner; state is re-read after wallet -> deposit locking.
         val playerId = deposits.findPlayerId(id) ?: throw DepositNotFoundException()
-        wallets.lockByPlayerId(playerId)
+        val lockedWallet = wallets.lockByPlayerId(playerId)
         val deposit = deposits.findForUpdate(id) ?: throw DepositNotFoundException()
         check(deposit.playerId == playerId) { "Deposit owner changed while acquiring locks" }
-        if (deposit.amount.compareTo(amount) != 0) throw DepositAmountMismatchException()
+        if (expectedAmount != null && deposit.amount.compareTo(expectedAmount) != 0) throw DepositAmountMismatchException()
         if (deposit.status == DepositStatus.COMPLETED) return DepositCompletion(id, duplicate = true)
+
+        val wallet = lifecycle.resolve(playerId, lockedWallet)
+        if (wallet.realBalance + deposit.amount > WalletSummary.MAX_BALANCE) return DepositBalanceLimit
 
         val balance = wallets.creditRealBalance(playerId, deposit.amount) ?: throw WalletBalanceLimitException()
         ledger.appendDeposit(playerId, id, deposit.amount, balance)
@@ -57,7 +68,9 @@ class DepositApplicationService(
     }
 }
 
-data class DepositCompletion(val depositId: UUID, val duplicate: Boolean, val bonusGranted: Boolean = false)
+sealed interface DepositOutcome
+data class DepositCompletion(val depositId: UUID, val duplicate: Boolean, val bonusGranted: Boolean = false) : DepositOutcome
+data object DepositBalanceLimit : DepositOutcome
 
 class DepositNotFoundException : RuntimeException()
 class DepositAmountMismatchException : RuntimeException()

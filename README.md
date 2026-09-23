@@ -4,11 +4,11 @@ A small casino wallet assignment built with Kotlin, Spring Boot, PostgreSQL and 
 
 The project is implemented in small, reviewable vertical slices with a green build required at the end of every stage.
 
-> **Current status:** Stage 5 — Welcome Bonus and Mixed-Funds Rounds.
+> **Current status:** Stage 6 — Bonus Completion, Expiration and Complete Angular Page.
 >
-> Signed provider callbacks complete deposits idempotently and grant one welcome bonus on the first qualifying completion. Rounds use real money first, split payouts proportionally and track wagering in one PostgreSQL transaction, with wallet row locking and immutable ledger history. Angular displays the authoritative wallet balances in EUR.
+> Deposits, mixed-funds rounds and welcome-bonus lifecycle use PostgreSQL transactions, wallet row locks and immutable ledger history. Wagering completion converts the remaining bonus to real funds; lazy expiration forfeits it. The Angular page supports deposits, demo completion, rounds, bonus progress, paginated transactions and EN/UK.
 >
-> Bonus completion, expiration processing, deposit/round/ledger UI and translations belong to Stage 6 and are not implemented yet.
+> Stage 7 delivery/CI work has not begun. Existing DEV, DEMO and TEST workflows remain available.
 
 See:
 
@@ -80,7 +80,8 @@ PostgreSQL
 ```json
 {
   "realBalance": "0.00",
-  "bonusBalance": "0.00"
+  "bonusBalance": "0.00",
+  "bonus": null
 }
 ```
 
@@ -88,7 +89,7 @@ Both values are decimal strings with exactly two fractional digits. Angular pres
 
 Flyway runs on backend startup in both DEV and DEMO. `V1__create_wallet.sql` creates `wallet` with `player_id UUID PRIMARY KEY` and two `NUMERIC(19,2) NOT NULL DEFAULT 0.00` balances, each protected by a nonnegative `CHECK`. `V2__seed_demo_wallet.sql` inserts one demo wallet for `00000000-0000-0000-0000-000000000001` with `0.00 / 0.00`. Applied migrations are recorded in `flyway_schema_history`; restarting does not reseed or reset balances.
 
-The read path is controller → application service → Spring JDBC → PostgreSQL. Deposits credit real money; a qualifying welcome grant credits bonus money. Rounds can change both balances. Reload the page to read the latest committed balances.
+The path is controller → application service → Spring JDBC → PostgreSQL. The summary runs a `READ_COMMITTED` transaction under the wallet row lock and resolves bonus lifecycle before returning. It can therefore commit a conversion or forfeiture. `bonus` is `null` before a grant; afterwards it retains `status` (`ACTIVE`, `COMPLETED`, `EXPIRED`), `initialAmount`, `wageringProgress`, `wageringTarget` (two-decimal strings) and `expiresAt` (UTC ISO timestamp). Historical metadata remains visible after resolution. The page refreshes wallet first, then ledger, after a financial action.
 
 ---
 
@@ -165,7 +166,23 @@ While holding the wallet lock, the callback checks for an existing bonus and for
 
 The `bonus` table stores the source deposit, initial amount, wagering target (`initial_amount × 20`), progress (initially `0.00`), `ACTIVE` status and timestamps. An injected UTC `Clock` sets `granted_at`; `expires_at` is exactly 168 hours later. Current bonus money lives only in `wallet.bonus_balance`. Each grant appends one positive `WELCOME_BONUS_GRANTED / BONUS / DEPOSIT` entry referencing the source deposit and the authoritative bonus balance after credit.
 
-Stage 5 stores lifetime metadata and advances wagering only. It does **not** expire, forfeit, complete or convert bonuses. Progress may exceed its target while status remains `ACTIVE` and the stake limit continues to apply. Those lifecycle transitions belong to Stage 6.
+`V6__bonus_completion_and_expiration.sql` adds terminal statuses and a database trigger preventing transitions out of `COMPLETED` or `EXPIRED`. V1–V5 remain immutable. No current bonus balance is duplicated in metadata.
+
+Lifecycle is resolved while holding the wallet lock:
+
+- When `wageringProgress >= wageringTarget`, completion takes priority, including for historical Stage 5 progress already above target. The current bonus balance is converted to real money, with two `BONUS_CONVERTED / BONUS` reference entries: negative on the bonus wallet and positive on the real wallet.
+- Otherwise `now >= expiresAt` expires an active bonus. Its remaining balance is forfeited with one negative `BONUS_FORFEITED / BONUS` reference entry; real money is unchanged.
+- A zero remaining balance changes status without a zero-value ledger entry. Repeated resolution is idempotent.
+- Resolution runs before wallet summary, a valid matching pending callback (including demo completion), and round execution. Pending creation, invalid signatures, amount mismatches and completed duplicate callbacks do not trigger it. There is no scheduler.
+- A completing round first settles its win and advances full-stake progress, then converts the remaining bonus in the same transaction. Already completed wagering wins over expiration; an otherwise expired bonus cannot fund a new round.
+
+Expected business rejection after resolution returns an application outcome before any new round/deposit writes, so resolved expiration can commit even when the API returns `409`. A technical failure rolls back lifecycle and the financial operation together. Conversion is guarded against real-balance overflow and fails safely with `WALLET_BALANCE_LIMIT`; no money is truncated or lost.
+
+## Demo deposit completion
+
+`POST /api/demo/deposits/{depositId}/complete` accepts no monetary input and completes the stored pending amount using the same application transaction, lock order, eligibility checks and idempotency as a provider callback. It returns `{"depositId":"<UUID>","status":"COMPLETED"}`. The Angular button uses this endpoint; no HMAC key or signature is sent to the browser. The signed provider endpoint is unchanged.
+
+This endpoint is enabled for the assignment demo only. Disable it with the backend property `demo.enabled=false` (for example Spring Boot application argument `--demo.enabled=false` or process environment `DEMO_ENABLED=false`), or remove it before a real deployment. For Compose, pass that optional property to the backend container via an override; it is not a required environment variable. The demo action does not collect a real payment.
 
 Errors use a safe Problem Detail response with a stable `code` and propagated `X-Request-ID`:
 
@@ -187,7 +204,7 @@ Errors use a safe Problem Detail response with a stable `code` and propagated `X
 curl --fail-with-body 'http://localhost:4200/api/ledger?page=0&size=20'
 ```
 
-The response contains `items`, `page`, `size`, `totalElements` and `totalPages`. Each item contains `id`, `walletType` (`REAL` or `BONUS`), `operationType` (`DEPOSIT_COMPLETED`, `WELCOME_BONUS_GRANTED`, `ROUND_STAKE` or `ROUND_WIN`), `amount`, `balanceAfter`, `referenceType` (`DEPOSIT` or `GAME_ROUND`), `referenceId` and UTC `createdAt`. Both money fields are two-decimal strings. Round stake amounts are negative, for example `"-8.00"`; deposits, grants and round payouts are positive.
+The response contains `items`, `page`, `size`, `totalElements` and `totalPages`. Each item contains `id`, `walletType` (`REAL` or `BONUS`), `operationType` (`DEPOSIT_COMPLETED`, `WELCOME_BONUS_GRANTED`, `ROUND_STAKE`, `ROUND_WIN`, `BONUS_CONVERTED`, `BONUS_FORFEITED`), `amount`, `balanceAfter`, `referenceType` (`DEPOSIT`, `GAME_ROUND`, `BONUS`), `referenceId` and UTC `createdAt`. Both money fields are two-decimal strings. Negative signs are preserved. Bonus lifecycle references identify the bonus UUID. V6 extends operation/sign/reference constraints while preserving uniqueness and append-only protection.
 
 Pages start at zero; the default size is 20 and the maximum is 100. Empty/out-of-range pages return an empty `items` array with the actual totals. SQL sorts by `created_at DESC, id DESC`, backed by a matching player/history index. Items and totals use one read-only PostgreSQL snapshot per request; separate page requests can naturally observe newly committed deposits or rounds.
 
@@ -217,11 +234,11 @@ HTTP `200`:
 The application service owns one `READ_COMMITTED` transaction:
 
 1. Lock the wallet and read its balances with `SELECT ... FOR UPDATE`.
-2. Load active bonus metadata. If active, require stake ≤ `5.00` even when real money covers the entire stake; check combined funds. Without an active bonus, check real funds only and apply no bonus stake limit.
+2. Resolve existing bonus lifecycle, then inspect the active bonus. If active, require stake ≤ `5.00` even when real money covers the entire stake; check combined funds. Without an active bonus, check real funds only and apply no bonus stake limit. Validate projected balances, including a possible conversion, before any round writes.
 3. Allocate real stake first and bonus stake for the remainder. Debit both balances in one `UPDATE ... RETURNING real_balance, bonus_balance`; append a negative `ROUND_STAKE` entry for each non-zero portion.
 4. Insert `game_round` with the stake, total payout and all four actual allocation amounts.
 5. For a positive payout, credit both win portions in one guarded `UPDATE ... RETURNING` and append a positive `ROUND_WIN` for each non-zero portion.
-6. If a bonus is active, increment wagering progress by the **full stake**, including fully real-funded stakes.
+6. If a bonus is active, increment wagering progress by the **full stake**, including fully real-funded stakes, and complete/convert it if the target is reached.
 7. Commit before logging or returning success.
 
 A zero payout produces no credit and no `ROUND_WIN` row; zero stake/win portions also produce no ledger entries. For the example above the two round ledger entries are `-4.00 / balanceAfter 6.00` and `+10.00 / balanceAfter 16.00`. Wallet, round, wagering progress and ledger entries commit or roll back together, including on commit-time failure. All bonus mutations first hold the wallet lock, which serializes metadata access and progress updates. Deposit callbacks retain their existing **wallet → deposit** lock order. The ledger remains audit history; current balances are always read from the wallet.
@@ -232,9 +249,9 @@ For mixed stakes, `realWin = round(totalWin × realStake / stake, 2, HALF_UP)` a
 |---|---|---|
 | 400 | `INVALID_ROUND_AMOUNT` | Invalid stake or totalWin; no financial writes |
 | 400 | `INVALID_REQUEST` | Malformed JSON/request; no financial writes |
-| 409 | `INSUFFICIENT_FUNDS` | Available funds cannot cover stake before payout; no financial or progress changes |
-| 409 | `MAX_BET_EXCEEDED` | Stake exceeds `5.00` while a bonus is active, including fully real-funded bets; no financial or progress changes |
-| 409 | `WALLET_BALANCE_LIMIT` | Payout would overflow `NUMERIC(19,2)`; the complete round rolls back |
+| 409 | `INSUFFICIENT_FUNDS` | Funds after lifecycle resolution cannot cover stake; no round or progress writes; prior resolution commits |
+| 409 | `MAX_BET_EXCEEDED` | Stake exceeds `5.00` while a bonus remains active; no round or progress writes |
+| 409 | `WALLET_BALANCE_LIMIT` | Payout/conversion would overflow `NUMERIC(19,2)`; no round writes; already resolved lifecycle can commit |
 | 500 | `INTERNAL_ERROR` | Technical failure; the complete round rolls back and internal details remain private |
 
 V1–V4 remain immutable schema history. `V5__welcome_bonus_and_mixed_rounds.sql` adds bonus metadata and extends `game_round` with required `NUMERIC(19,2)` fields `real_stake`, `bonus_stake`, `real_win` and `bonus_win`. Existing Stage 4 rows are backfilled as real-only (`real_stake = stake`, `real_win = total_win`, both bonus portions zero) before enforcing non-null and allocation-sum constraints. Historical ledger rows are unchanged. The original UUIDs, wallet foreign key, stake, payout and creation timestamp remain; no round status machinery is added.
@@ -243,7 +260,13 @@ V5 extends ledger constraints to `REAL` and `BONUS`: positive deposit credits re
 
 PostgreSQL integration tests fund the wallet through signed deposits and prove that two concurrent `8.00` losing bets against `10.00` produce exactly one success and one `INSUFFICIENT_FUNDS` response, leaving `2.00`, one round and one stake entry. A controlled transaction holds the wallet row lock; bounded polling follows `pg_blocking_pids` from its known backend PID to prove that both requests actually wait in PostgreSQL. No SQL-text matching or timing-only concurrency proof is used. Tests also verify rollback and `sum(REAL ledger amounts) = wallet.real_balance`.
 
-Stage 5 tests also prove concurrent qualifying deposits grant once, concurrent active-bonus stakes do not lose wagering progress, mixed rounds roll back atomically, and both `sum(REAL ledger amounts)` and `sum(BONUS ledger amounts)` reconcile independently with the wallet. Contention is proved with the same PostgreSQL blocking probe. The Angular forms and bonus-progress view belong to Stage 6; the existing wallet page displays both backend balances after refresh.
+Tests also prove concurrent qualifying deposits grant once, concurrent active-bonus stakes do not lose wagering progress, and both `sum(REAL ledger amounts)` and `sum(BONUS ledger amounts)` reconcile independently with the wallet. Stage 6 covers exact expiration boundaries using a controlled `Clock`, completion after the final mixed win, zero remaining balances, repeated/concurrent lifecycle resolution and commit-time failures. Contention uses a known PostgreSQL PID and `pg_blocking_pids`; deferred test-only database triggers prove rollback after mutations have occurred.
+
+## Angular page
+
+Open `http://localhost:4200`. The page includes authoritative balances, bonus history/progress, Reactive Forms for deposits and deterministic rounds, demo deposit completion and a newest-first ledger with ten rows per page. Switch between English and Ukrainian using EN/UK. Labels, enum values, validation, loading, success and error states are translated; money stays as backend decimal strings. Dates display explicitly in UTC.
+
+The page validates decimal syntax/range, but the backend decides available funds, allocation, bonus limits and lifecycle. Actions are disabled while requests are active. A small Signals facade coordinates requests, refreshes wallet before ledger, and rejects stale responses using a generation token. A pending deposit does not trigger a wallet refresh. A rejected financial action does refresh, because expiration may have committed. Errors use an allowlist of stable `ProblemDetail.code` translations, with a generic fallback; server detail text is never displayed. No frontend signing secret, money arithmetic or client-side lifecycle decisions are present.
 
 ---
 
@@ -918,7 +941,7 @@ frontend  -> healthy
 
 Backend readiness verifies real PostgreSQL connectivity.
 
-Both wallet requests must return HTTP `200`, decimal strings (`0.00 / 0.00` on a fresh database), and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database V1–V5 are applied. Existing volumes retain their balances and history.
+Both wallet requests must return HTTP `200`, decimal strings (`0.00 / 0.00` and `bonus: null` on a fresh database), and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database V1–V6 are applied. Existing volumes retain their balances and history.
 
 Before shutting down the stack, also exercise the deposit examples above: creation leaves balances/history unchanged; the signed callback credits exactly once; a duplicate remains successful; an invalid signature returns `401`; a freshly signed mismatched amount returns `409`. Verify the resulting wallet and ledger through Nginx, restart the backend and retry the matching callback to verify durable idempotency. These operations intentionally persist demo history; do not delete the PostgreSQL volume to reset it. Automated financial/schema tests use disposable Testcontainers databases instead.
 
@@ -926,7 +949,9 @@ For the Stage 4 financial smoke on a fresh wallet, create a `10.00` deposit and 
 
 Liveness remains independent from PostgreSQL so the JVM process can remain alive and recover from a temporary database outage.
 
-For a Stage 5 smoke with no prior qualifying completion, complete deposits of `19.99` and `20.00`. On a fresh wallet this produces `39.99 / 20.00`, one active bonus with target `400.00` and zero progress. Reject `5.01`, verifying unchanged state, then use legal losing stakes of at most `5.00` to reduce real funds and exercise a mixed winning round. Verify the persisted allocation, both wallet types in `/api/ledger`, full-stake wagering progress, request IDs and independent balance reconciliation. Account for any existing reconciled balance; do not edit wallet balances or delete the demo volume to prepare this scenario. Completion and expiration are deliberately absent in Stage 5.
+For a bonus smoke with no prior qualifying completion, complete deposits of `19.99` and `20.00`. On a fresh wallet this produces `39.99 / 20.00`, one active bonus with target `400.00` and zero progress. Reject `5.01`, verifying unchanged state, then use legal losing stakes of at most `5.00` to reduce real funds and exercise a mixed winning round. Verify the persisted allocation, both wallet types in `/api/ledger`, full-stake wagering progress, request IDs and independent balance reconciliation. Account for any existing reconciled balance; do not edit wallet balances or delete the demo volume to prepare this scenario.
+
+For Stage 6, perform deposit creation and demo completion from the browser, then play a valid round and an over-limit/insufficient-funds round. Verify bonus metadata, refreshed balances/history, pagination and EN/UK, including error translations. Inspect the browser console/network: no unexpected errors, and no provider secret or signature in frontend requests/assets. To reach completion without waiting, use funded neutral rounds (`stake = totalWin`, stake at most `5.00` while active) through the public API until the target is reached, then refresh the browser and verify the converted balance and exactly one conversion pair. Expiration boundaries and expiration-plus-rejection are covered by controlled-Clock integration tests; do not change runtime clocks or database timestamps for the smoke.
 
 ---
 
@@ -1033,7 +1058,7 @@ PostgreSQL
 
 # Reliability Strategy
 
-Stage 5 implements real deposit credits, one-time welcome grants and synchronous real/mixed-funds rounds. Financial writes follow these rules:
+Stage 6 implements real deposit credits, one-time welcome grants, synchronous real/mixed-funds rounds, bonus completion and lazy expiration. Financial writes follow these rules:
 
 - PostgreSQL is the only durable transactional system.
 - Each balance-changing use case executes in one application-service transaction.
@@ -1074,7 +1099,7 @@ Financial state uses strong consistency.
 
 PostgreSQL is the single source of truth for real and bonus balances, deposits, bonus metadata, wagering progress and durable callback idempotency.
 
-The `wallet` table contains the current real and bonus balances. Welcome grants and mixed-funds rounds update bonus money; all financial changes have matching ledger entries in the same transaction.
+The `wallet` table contains the current real and bonus balances. Welcome grants, mixed rounds, conversion and forfeiture update money; all non-zero financial changes have matching ledger entries in the same transaction.
 
 The ledger is append-only history written in the same transaction as each balance change; the wallet remains the authoritative current state.
 
@@ -1109,6 +1134,22 @@ Sensitive Actuator endpoints and sensitive health details are not exposed.
 ---
 
 ## Request Correlation
+
+The implemented error/logging paths are:
+
+| Boundary | Controlled outcomes | Logging |
+|---|---|---|
+| Wallet summary | Lifecycle resolution, balance-limit conflict, safe technical failure | Lifecycle success after commit; one `api_failure` for unexpected failure |
+| Deposit creation | Invalid amount/request; pending creation | `deposit_created` after commit |
+| Signed callback | Invalid signature/body, unknown deposit, mismatch, balance limit, duplicate success | `deposit_callback_completed`, duplicate flag, optional `welcome_bonus_granted`, after commit |
+| Demo completion | Unknown/invalid ID, balance limit, duplicate success; same financial transaction | `demo_deposit_completed`, duplicate flag, optional grant, after commit |
+| Round | Invalid input, max bet, insufficient funds, balance limit | `round_completed` after commit; controlled rejection without a stack trace |
+| Ledger | Invalid pagination; safe database failure | Shared request/error handling |
+| Bonus lifecycle | Completion, expiration, no-op repeat, technical rollback | `bonus_completed` / `bonus_expired` only after commit; caller reports failures once |
+| Actuator | Liveness independent of DB; readiness `503` when DB unavailable | Framework health handling; details/components hidden |
+| Correlation filter | Every request outcome, including failure | One INFO `http_request`; MDC cleared in `finally` |
+
+All application errors use sanitized Problem Details and stable codes. Known `401`/`409` rejections log WARN; other controlled client errors log INFO. They do not log ERROR stack traces. Unexpected application and response-serialization failures return `500 / INTERNAL_ERROR` and log one ERROR with exception type, sanitized cause types, original stack frames and request ID. Exception messages are omitted because JDBC causes may include SQL or payload values. Lower layers do not log-and-rethrow. The separate INFO completion record is not a second error trace. Existing Actuator/Micrometer HTTP/JVM metrics remain; no new custom metrics or monitoring services were added.
 
 The backend supports:
 
@@ -1193,7 +1234,7 @@ Angular 17 is explicitly required by the assignment and is therefore pinned to:
 
 Angular 17 is no longer within the upstream Angular support window.
 
-At bootstrap review:
+At the Stage 6 review:
 
 ```bash
 npm audit --omit=dev
@@ -1202,8 +1243,8 @@ npm audit --omit=dev
 reports:
 
 ```text
-5 vulnerabilities
-2 moderate
+6 vulnerabilities
+3 moderate
 3 high
 ```
 
@@ -1215,7 +1256,7 @@ A complete:
 npm audit
 ```
 
-also reports findings in Angular build/test dependencies, including deprecated transitive packages.
+reports 48 findings (4 low, 20 moderate, 23 high, 1 critical), including Angular build/test dependencies and deprecated transitive packages. The only Stage 6 dependency addition is `@angular/forms@17.3.12`, required for Reactive Forms and aligned with the pinned Angular runtime. Counts describe the audit at review time and may change as advisories are published.
 
 Automated remediation proposes upgrading Angular to a newer major version, which would violate the explicit Angular 17 requirement.
 

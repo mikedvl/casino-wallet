@@ -211,7 +211,12 @@ class RoundIntegrationTest @Autowired constructor(
                 val requests = List(2) { executor.submit<ResponseEntity<JsonNode>> { play("8.00", "0.00") } }
                 try {
                     PostgresLockProbe.awaitBlockedSessions(jdbc, pid, 2)
-                    assertState("10.00", 0, 0)
+                    // GET /api/wallet now resolves bonus lifecycle under the same wallet lock.
+                    assertThat(jdbc.queryForObject<BigDecimal>("select real_balance from wallet"))
+                        .isEqualTo(BigDecimal("10.00"))
+                    assertThat(jdbc.queryForObject<Long>("select count(*) from game_round")).isZero()
+                    assertThat(jdbc.queryForObject<Long>("select count(*) from ledger_entry where reference_type = 'GAME_ROUND'"))
+                        .isZero()
                 } finally {
                     blocker.rollback()
                 }

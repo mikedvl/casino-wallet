@@ -58,20 +58,19 @@ class JdbcWalletRepository(private val jdbc: NamedParameterJdbcTemplate) {
         mapOf("playerId" to playerId, "amount" to amount),
     ) { row, _ -> row.getBigDecimal("bonus_balance") }.singleOrNull()
 
-    fun getByPlayerId(playerId: UUID): WalletSummary = checkNotNull(
-        jdbc.queryForObject(
-            // language=PostgreSQL
-            """
-            select real_balance, bonus_balance
-            from wallet
-            where player_id = :playerId
-            """.trimIndent(),
-            mapOf("playerId" to playerId),
-        ) { row, _ ->
-            WalletSummary(
-                realBalance = row.getBigDecimal("real_balance"),
-                bonusBalance = row.getBigDecimal("bonus_balance"),
-            )
-        },
-    )
+    fun convertBonusToReal(playerId: UUID): WalletSummary? = jdbc.query(
+        // language=PostgreSQL
+        """
+        update wallet set real_balance = real_balance + bonus_balance, bonus_balance = 0.00
+        where player_id = :playerId and real_balance + bonus_balance <= 99999999999999999.99
+        returning real_balance, bonus_balance
+        """.trimIndent(),
+        mapOf("playerId" to playerId),
+    ) { row, _ -> WalletSummary(row.getBigDecimal("real_balance"), row.getBigDecimal("bonus_balance")) }.singleOrNull()
+
+    fun forfeitBonus(playerId: UUID): WalletSummary = checkNotNull(jdbc.queryForObject(
+        // language=PostgreSQL
+        "update wallet set bonus_balance = 0.00 where player_id = :playerId returning real_balance, bonus_balance",
+        mapOf("playerId" to playerId),
+    ) { row, _ -> WalletSummary(row.getBigDecimal("real_balance"), row.getBigDecimal("bonus_balance")) })
 }

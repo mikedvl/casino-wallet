@@ -341,14 +341,16 @@ class BonusIntegrationTest @Autowired constructor(
     }
 
     @Test
-    fun `target may be exceeded without conversion completion or removal of the active limit`() {
+    fun `reaching the target converts once and subsequent rounds no longer have an active bonus limit`() {
         fund("20.00")
         repeat(81) { assertThat(play("5.00", "5.00").statusCode).isEqualTo(HttpStatus.OK) }
-        assertProgress("405.00")
-        assertWallet("20.00", "20.00")
-        val before = snapshot()
-        assertError(play("5.01", "0.00"), HttpStatus.CONFLICT, "MAX_BET_EXCEEDED")
-        assertThat(snapshot()).isEqualTo(before)
+        assertProgress("400.00", "COMPLETED")
+        assertThat(jdbc.queryForObject<String>("select status from bonus")).isEqualTo("COMPLETED")
+        assertWallet("40.00", "0.00")
+        assertPlay("5.01", "0.00", "34.99", "0.00")
+        assertProgress("400.00", "COMPLETED")
+        assertThat(jdbc.queryForObject<Long>("select count(*) from ledger_entry where operation_type = 'BONUS_CONVERTED'"))
+            .isEqualTo(2L)
     }
 
     private fun prepareMixedWallet() {
@@ -420,9 +422,9 @@ class BonusIntegrationTest @Autowired constructor(
         assertThat(jdbc.queryForObject<Long>("select count(*) from ledger_entry where amount = 0 or balance_after < 0")).isZero()
     }
 
-    private fun assertProgress(expected: String) {
+    private fun assertProgress(expected: String, status: String = "ACTIVE") {
         val bonus = jdbc.queryForMap("select status, wagering_progress from bonus")
-        assertThat(bonus["status"]).isEqualTo("ACTIVE")
+        assertThat(bonus["status"]).isEqualTo(status)
         assertThat(bonus["wagering_progress"]).isEqualTo(BigDecimal(expected))
     }
 

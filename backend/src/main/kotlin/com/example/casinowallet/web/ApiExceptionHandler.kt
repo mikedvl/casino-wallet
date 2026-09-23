@@ -51,9 +51,10 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
 
     @ExceptionHandler(Exception::class)
     fun unexpected(exception: Exception): ProblemDetail {
-        // Database exception messages can contain SQL and values; log only the exception type.
-        log.error("event=api_failure exception_type={}", exception.javaClass.simpleName)
-        return problem(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "The request could not be completed")
+        // Keep exception types and stack frames; driver/cause messages can contain SQL, payloads or secrets.
+        log.error("event=api_failure exception_type={}", exception.javaClass.simpleName, safeException(exception))
+        return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "The request could not be completed")
+            .apply { setProperty("code", "INTERNAL_ERROR") }
     }
 
     override fun handleExceptionInternal(
@@ -63,12 +64,24 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
         statusCode: HttpStatusCode,
         request: WebRequest,
     ): ResponseEntity<Any>? = super.handleExceptionInternal(
-        ex, problem(statusCode, "INVALID_REQUEST", "Invalid request"), headers, statusCode, request,
+        ex,
+        if (statusCode.is5xxServerError) unexpected(ex) else problem(statusCode, "INVALID_REQUEST", "Invalid request"),
+        headers, statusCode, request,
     )
 
     private fun problem(status: HttpStatusCode, code: String, detail: String): ProblemDetail {
-        log.info("event=api_rejected code={} status={}", code, status.value())
+        if (status.value() == 401 || status.value() == 409) {
+            log.warn("event=api_rejected code={} status={}", code, status.value())
+        } else {
+            log.info("event=api_rejected code={} status={}", code, status.value())
+        }
         return ProblemDetail.forStatusAndDetail(status, detail).apply { setProperty("code", code) }
+    }
+
+    private fun safeException(source: Throwable, depth: Int = 0): Throwable = Throwable(source.javaClass.name).apply {
+        stackTrace = source.stackTrace
+        // Bound malformed/cyclic cause chains without copying potentially sensitive exception messages.
+        if (depth < 8) source.cause?.takeIf { it !== source }?.let { initCause(safeException(it, depth + 1)) }
     }
 }
 
