@@ -23,6 +23,7 @@ import org.springframework.jdbc.core.queryForList
 import org.springframework.jdbc.core.queryForObject
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
+import org.springframework.test.annotation.DirtiesContext
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
@@ -30,6 +31,7 @@ import java.math.BigDecimal
 import java.sql.SQLException
 import java.util.UUID
 
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class WalletReadIntegrationTest @Autowired constructor(
@@ -39,12 +41,12 @@ class WalletReadIntegrationTest @Autowired constructor(
     private val flyway: Flyway,
 ) {
     @Test
-    fun `migrations create only the wallet schema and seed one zero balance wallet`() {
+    fun `migrations create the approved schema and seed one zero balance wallet`() {
         val tables = jdbc.queryForList<String>(
             // language=PostgreSQL
             "select table_name from information_schema.tables where table_schema = 'public'",
         )
-        assertThat(tables).containsExactlyInAnyOrder("wallet", "flyway_schema_history")
+        assertThat(tables).containsExactlyInAnyOrder("wallet", "deposit", "ledger_entry", "flyway_schema_history")
         val failedMigrations = jdbc.queryForObject<Long>(
             // language=PostgreSQL
             "select count(*) from flyway_schema_history where success = false",

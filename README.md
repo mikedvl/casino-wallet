@@ -4,11 +4,11 @@ A small casino wallet assignment built with Kotlin, Spring Boot, PostgreSQL and 
 
 The project is implemented in small, reviewable vertical slices with a green build required at the end of every stage.
 
-> **Current status:** Stage 2 — Wallet Read Vertical Slice.
+> **Current status:** Stage 3 — Deposits and Append-Only Ledger.
 >
-> Flyway creates and seeds the wallet. Spring JDBC serves its authoritative balances through `GET /api/wallet`, and Angular displays them in EUR.
+> Pending deposits are completed by signed provider callbacks. PostgreSQL atomically stores the real balance credit, deposit completion and immutable ledger history. Angular displays the authoritative wallet balances in EUR.
 >
-> Deposits, callbacks, ledger, bonus lifecycle, rounds, wallet mutations and translations are not implemented yet.
+> Bonus lifecycle, rounds, wagering, deposit/ledger UI and translations are not implemented yet.
 
 See:
 
@@ -61,7 +61,7 @@ Backend
   - business rules
   - transaction boundaries
   - observability
-  - future wallet locking and financial consistency
+  - wallet locking and financial consistency
 
 PostgreSQL
   - durable application state
@@ -88,7 +88,98 @@ Both values are decimal strings with exactly two fractional digits. Angular pres
 
 Flyway runs on backend startup in both DEV and DEMO. `V1__create_wallet.sql` creates `wallet` with `player_id UUID PRIMARY KEY` and two `NUMERIC(19,2) NOT NULL DEFAULT 0.00` balances, each protected by a nonnegative `CHECK`. `V2__seed_demo_wallet.sql` inserts one demo wallet for `00000000-0000-0000-0000-000000000001` with `0.00 / 0.00`. Applied migrations are recorded in `flyway_schema_history`; restarting does not reseed or reset balances.
 
-The read path is controller → application service → Spring JDBC → PostgreSQL. No wallet writes or row locks are exposed in Stage 2.
+The read path is controller → application service → Spring JDBC → PostgreSQL. Completed deposits update the real balance; the bonus balance is unchanged. Reload the page to read the latest committed balances.
+
+---
+
+# Deposits and Ledger API
+
+The demo uses the same seeded player for deposit creation, wallet reads and ledger reads. There is no authentication or caller-selected player ID at this stage.
+
+`V3__create_deposits_and_ledger.sql` adds `deposit` and `ledger_entry`; V1/V2 remain unchanged. Both tables reference the wallet and use `NUMERIC(19,2)` money with database constraints. A unique `(player_id, reference_type, reference_id, operation_type, wallet_type)` key prevents duplicate ledger operations. A PostgreSQL statement trigger rejects ledger `UPDATE`, `DELETE` and `TRUNCATE`, including direct SQL. Administrative schema changes remain the database owner's responsibility.
+
+## Create a pending deposit
+
+```bash
+curl --fail-with-body -i http://localhost:4200/api/deposits \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: deposit-create-example' \
+  --data-binary '{"amount":"25.00"}'
+```
+
+HTTP `201`:
+
+```json
+{"depositId":"<server-generated UUID>","amount":"25.00","status":"PENDING"}
+```
+
+`amount` must be a positive plain decimal **string**, with at most two fractional digits, no exponent and a maximum of `99999999999999999.99`. `"25"` normalizes to `"25.00"`; extra fractional digits are rejected without rounding. Creating a pending deposit neither credits the wallet nor writes ledger history. It takes no wallet `FOR UPDATE` lock; PostgreSQL still performs normal foreign-key checks.
+
+## Complete a deposit through the provider callback
+
+`POST /api/provider/deposits/callback` accepts:
+
+```json
+{"depositId":"<existing UUID>","amountCents":2500}
+```
+
+`X-Signature` is the 64-character hexadecimal HMAC-SHA256 of the **exact request body bytes**, using `PAYMENT_PROVIDER_HMAC_SECRET` as a UTF-8 key. Hex letter case is ignored. Signature verification precedes JSON parsing and database access; decoded digests are compared with `MessageDigest.isEqual`. Reformatting JSON requires a new signature.
+
+`amountCents` must be a positive JSON integer. Strings, fractional JSON numbers and values above `9999999999999999999` are rejected. Conversion uses `BigInteger` and `BigDecimal(cents, 2)`, preserving the full database range without floating point or `Long` overflow.
+
+Compose and local Spring Boot share the harmless `local-demo-hmac-secret-change-me` default shown in `.env.example`. Override `PAYMENT_PROVIDER_HMAC_SECRET` in the backend environment for a different provider key. Compose reads `.env`; a local IDE/JVM run must receive the variable in its process environment. Never use the demo default for a real provider, commit a real secret, or log signatures/raw callback bodies.
+
+After copying the returned deposit UUID into `DEPOSIT_ID`, this example signs and sends the same byte array. Set the signing process's secret to match the backend if overriding the demo default:
+
+```bash
+export DEPOSIT_ID='<UUID returned by POST /api/deposits>'
+python3 - <<'PY'
+import hashlib
+import hmac
+import json
+import os
+import urllib.request
+
+body = json.dumps({"depositId": os.environ["DEPOSIT_ID"], "amountCents": 2500}, separators=(",", ":")).encode("utf-8")
+secret = os.environ.get("PAYMENT_PROVIDER_HMAC_SECRET", "local-demo-hmac-secret-change-me").encode("utf-8")
+signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
+request = urllib.request.Request("http://localhost:4200/api/provider/deposits/callback", data=body, headers={
+    "Content-Type": "application/json",
+    "X-Signature": signature,
+    "X-Request-ID": "deposit-callback-example",
+})
+with urllib.request.urlopen(request) as response:
+    print(response.status, response.read().decode("utf-8"))
+PY
+```
+
+HTTP `200` returns `{"depositId":"<UUID>","status":"COMPLETED"}`. Repeating the correctly signed callback with the matching amount returns the same success without another credit or ledger row, including after a backend restart.
+
+Completion runs in one application-service `READ_COMMITTED` transaction. An unlocked lookup discovers the owner, then rows are locked **wallet → deposit** with `SELECT ... FOR UPDATE`. The locked amount and status are checked again. The wallet credit, ledger insert and completion timestamp commit or roll back together. The credited balance comes from `UPDATE ... RETURNING`; success is logged and returned only after commit. Idempotency uses PostgreSQL state and uniqueness, with no cache or in-memory keys.
+
+Errors use a safe Problem Detail response with a stable `code` and propagated `X-Request-ID`:
+
+| Status | Code | Condition |
+|---|---|---|
+| 400 | `INVALID_DEPOSIT_AMOUNT` | Invalid creation amount |
+| 400 | `INVALID_CALLBACK` | Signed but invalid callback JSON, UUID or cents |
+| 400 | `INVALID_PAGINATION` | Negative page or size outside 1–100 |
+| 400 | `INVALID_REQUEST` | Malformed request or unparseable query parameter |
+| 401 | `INVALID_SIGNATURE` | Missing, malformed or incorrect signature, even for completed/unknown deposits |
+| 404 | `DEPOSIT_NOT_FOUND` | A correctly signed callback references an unknown deposit |
+| 409 | `DEPOSIT_AMOUNT_MISMATCH` | Callback amount differs, including after completion |
+| 409 | `WALLET_BALANCE_LIMIT` | The credit would exceed `NUMERIC(19,2)` |
+| 500 | `INTERNAL_ERROR` | An unexpected failure; no SQL or internal exception details are returned |
+
+## Read ledger history
+
+```bash
+curl --fail-with-body 'http://localhost:4200/api/ledger?page=0&size=20'
+```
+
+The response contains `items`, `page`, `size`, `totalElements` and `totalPages`. Each item contains `id`, `walletType` (`REAL`), `operationType` (`DEPOSIT_COMPLETED`), `amount`, `balanceAfter`, `referenceType` (`DEPOSIT`), `referenceId` and UTC `createdAt`. Both money fields are two-decimal strings.
+
+Pages start at zero; the default size is 20 and the maximum is 100. Empty/out-of-range pages return an empty `items` array with the actual totals. SQL sorts by `created_at DESC, id DESC`, backed by a matching player/history index. Items and totals use one read-only PostgreSQL snapshot per request; separate page requests can naturally observe newly committed deposits.
 
 ---
 
@@ -314,10 +405,10 @@ frontend
    ↓ healthy
 ```
 
-If port `5432` is already occupied, change the published PostgreSQL port in `.env`:
+PostgreSQL defaults to `localhost:15432`, including when no `.env` exists. To use another host port, set `POSTGRES_PORT` in `.env` or export it in the shell, for example:
 
 ```text
-POSTGRES_PORT=15432
+POSTGRES_PORT=25432
 ```
 
 The internal container connection remains:
@@ -339,7 +430,7 @@ Only the host mapping changes.
 | Backend readiness | http://localhost:8080/actuator/health/readiness |
 | Backend info | http://localhost:8080/actuator/info |
 | Backend metrics | http://localhost:8080/actuator/metrics |
-| PostgreSQL | localhost:5432 |
+| PostgreSQL | localhost:15432 |
 
 Inspect the stack:
 
@@ -398,10 +489,10 @@ From the repository root:
 docker compose up -d postgres
 ```
 
-If local port `5432` is occupied:
+If local port `15432` is occupied, choose another host port:
 
 ```bash
-POSTGRES_PORT=15432 docker compose up -d postgres
+POSTGRES_PORT=25432 docker compose up -d postgres
 ```
 
 Check health:
@@ -426,17 +517,13 @@ From:
 cd backend
 ```
 
-Default PostgreSQL port:
-
-```bash
-./gradlew bootRun
-```
-
-If PostgreSQL is published on `15432`:
+With the default Compose host port:
 
 ```bash
 DB_PORT=15432 ./gradlew bootRun
 ```
+
+If you override `POSTGRES_PORT`, pass the same value as `DB_PORT` to the local backend.
 
 Backend URL:
 
@@ -580,9 +667,9 @@ Use IntelliJ's **Stop** menu to stop the DEV child sessions together (or **Stop 
 
 Stop the local DEV processes before launching DEMO because both modes use host ports `8080` and `4200`. DEMO builds both application images and retains the existing Compose healthchecks and startup dependencies. Stop the stack through Docker Services or `docker compose stop`; do not select volume removal.
 
-DEMO uses normal Compose environment settings: PostgreSQL defaults to host port `5432`. If that port is occupied, set `POSTGRES_PORT=15432` in the ignored root `.env`, as described in the Docker workflow above.
+DEMO uses normal Compose environment settings: PostgreSQL defaults to host port `15432`, also without `.env`. Override `POSTGRES_PORT` through `.env` or the shell if needed; the backend container continues to connect to `postgres:5432`.
 
-All CLI workflows remain independent of IntelliJ, including `docker compose up --build`, `./gradlew bootRun`, `npm start` and `./scripts/verify.sh`.
+All CLI workflows remain independent of IntelliJ, including `docker compose up --build`, `DB_PORT=15432 ./gradlew bootRun`, `npm start` and `./scripts/verify.sh`.
 
 ---
 
@@ -628,7 +715,7 @@ Do not use full Docker image rebuilds as the normal source-code development loop
 
 # Configuration
 
-Local backend defaults match `.env.example`.
+Local backend database name and credentials match `.env.example`. Set `DB_PORT=15432` for a local JVM to use the default Compose host mapping; the backend container uses `postgres:5432`.
 
 Supported backend environment variables:
 
@@ -767,7 +854,9 @@ frontend  -> healthy
 
 Backend readiness verifies real PostgreSQL connectivity.
 
-Both wallet requests must return HTTP `200`, decimal strings `0.00 / 0.00` for the seeded wallet, and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database both migrations are applied.
+Both wallet requests must return HTTP `200`, decimal strings (`0.00 / 0.00` on a fresh database), and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database V1–V3 are applied. Existing volumes retain their balances and history.
+
+Before shutting down the stack, also exercise the deposit examples above: creation leaves balances/history unchanged; the signed callback credits exactly once; a duplicate remains successful; an invalid signature returns `401`; a freshly signed mismatched amount returns `409`. Verify the resulting wallet and ledger through Nginx, restart the backend and retry the matching callback to verify durable idempotency. These operations intentionally persist demo history; do not delete the PostgreSQL volume to reset it. Automated financial/schema tests use disposable Testcontainers databases instead.
 
 Liveness remains independent from PostgreSQL so the JVM process can remain alive and recover from a temporary database outage.
 
@@ -876,9 +965,7 @@ PostgreSQL
 
 # Reliability Strategy
 
-Stage 2 implements wallet reads only. Balance-changing functionality belongs to later stages.
-
-Later financial stages follow these rules:
+Stage 3 implements real-balance deposit credits. Financial writes follow these rules:
 
 - PostgreSQL is the only durable transactional system.
 - Each balance-changing use case executes in one application-service transaction.
@@ -909,7 +996,7 @@ FOREIGN KEY
 append-only protections
 ```
 
-The wallet already has a primary key, required balances and nonnegative checks. Ledger protections, related financial tables and wallet write locks belong to later stages.
+The wallet has a primary key, required balances and nonnegative checks. Deposit/ledger constraints, unique financial operations, append-only enforcement and wallet-first row locks protect the implemented deposit flow.
 
 ---
 
@@ -917,15 +1004,11 @@ The wallet already has a primary key, required balances and nonnegative checks. 
 
 Financial state uses strong consistency.
 
-PostgreSQL is the single source of truth for real and bonus balances. Later stages will also store:
+PostgreSQL is the single source of truth for real and bonus balances, deposit state and durable callback idempotency. Wagering belongs to a later stage.
 
-- wagering progress;
-- deposit state;
-- durable callback idempotency.
+The `wallet` table contains the current real and bonus balances. Deposit completion credits the real balance only.
 
-The `wallet` table contains the current real and bonus balances. Stage 2 exposes only reads.
-
-The ledger will be append-only history written in the same transaction as each balance change.
+The ledger is append-only history written in the same transaction as each balance change; the wallet remains the authoritative current state.
 
 Bonus metadata will not duplicate the mutable current bonus balance.
 

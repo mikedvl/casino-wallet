@@ -10,6 +10,10 @@ spring:
       connection-timeout: 2000
       validation-timeout: 1000
 
+payment:
+  provider:
+    hmac-secret: ${PAYMENT_PROVIDER_HMAC_SECRET:local-demo-hmac-secret-change-me}
+
 server:
   port: ${SERVER_PORT:8080}
   error:
