@@ -1,0 +1,33 @@
+.balances {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 1rem;
+}
+
+.balances > div {
+  padding: 1.5rem;
+  background: #fff;
+  border: 1px solid #dce2eb;
+  border-radius: 0.5rem;
+}
+
+dt { color: #4b5565; }
+dd {
+  margin: 0.75rem 0 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+button {
+  padding: 0.6rem 1rem;
+  border: 1px solid #4053aa;
+  border-radius: 0.25rem;
+  background: #4053aa;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:focus-visible { outline: 2px solid #202938; outline-offset: 3px; }

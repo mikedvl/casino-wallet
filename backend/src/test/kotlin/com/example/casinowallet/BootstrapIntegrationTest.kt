@@ -7,11 +7,14 @@ import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
+import org.springframework.boot.test.web.client.exchange
+import org.springframework.boot.test.web.client.getForEntity
 import org.springframework.http.HttpEntity
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
 import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.jdbc.core.queryForObject
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 import org.testcontainers.containers.PostgreSQLContainer
@@ -22,52 +25,52 @@ import java.util.UUID
 
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-class BootstrapIntegrationTest {
-    @Autowired
-    private lateinit var http: TestRestTemplate
-
-    @Autowired
-    private lateinit var jdbc: JdbcTemplate
-
+class BootstrapIntegrationTest @Autowired constructor(
+    private val http: TestRestTemplate,
+    private val jdbc: JdbcTemplate,
+) {
     @Test
-    fun `bootstrap exposes healthy infrastructure without business tables`() {
-        assertThat(jdbc.queryForObject("select 1", Int::class.java)).isEqualTo(1)
-        assertThat(jdbc.queryForObject(
-            "select count(*) from information_schema.tables where table_schema = 'public'",
-            Long::class.java,
-        )).isZero()
+    fun `infrastructure exposes health and only approved actuator endpoints`() {
+        assertThat(jdbc.queryForObject<Int>(
+            // language=PostgreSQL
+            "select 1",
+        )).isEqualTo(1)
 
         for (path in listOf("/actuator/health", "/actuator/health/liveness", "/actuator/health/readiness")) {
-            val response = http.getForEntity(path, JsonNode::class.java)
+            val response = http.getForEntity<JsonNode>(path)
             assertThat(response.statusCode).isEqualTo(HttpStatus.OK)
-            assertThat(response.body!!.path("status").asText()).isEqualTo("UP")
-            assertThat(response.body!!.has("components")).isFalse()
-            assertThat(response.body!!.has("details")).isFalse()
+            val health = checkNotNull(response.body) { "Expected a health response body for $path" }
+            assertThat(health.path("status").asText()).isEqualTo("UP")
+            assertThat(health.has("components")).isFalse()
+            assertThat(health.has("details")).isFalse()
         }
-        val metrics = http.getForEntity("/actuator/metrics", JsonNode::class.java)
+        val metrics = http.getForEntity<JsonNode>("/actuator/metrics")
         assertThat(metrics.statusCode).isEqualTo(HttpStatus.OK)
-        assertThat(metrics.body!!.path("names").map { it.asText() }).contains("jvm.memory.used")
-        assertThat(http.getForEntity("/actuator/info", String::class.java).statusCode).isEqualTo(HttpStatus.OK)
+        val metricsBody = checkNotNull(metrics.body) { "Expected a metrics response body" }
+        assertThat(metricsBody.path("names").map { it.asText() }).contains("jvm.memory.used")
+        assertThat(http.getForEntity<String>("/actuator/info").statusCode).isEqualTo(HttpStatus.OK)
 
         for (endpoint in listOf("env", "configprops", "beans", "heapdump", "prometheus")) {
-            assertThat(http.getForEntity("/actuator/$endpoint", String::class.java).statusCode)
+            assertThat(http.getForEntity<String>("/actuator/$endpoint").statusCode)
                 .isEqualTo(HttpStatus.NOT_FOUND)
         }
-        assertThat(http.getForEntity("/api/wallet", String::class.java).statusCode).isEqualTo(HttpStatus.NOT_FOUND)
     }
 
     @Test
     fun `request ids are generated propagated and bounded`() {
-        val generated = http.getForEntity("/actuator/health/liveness", String::class.java)
-            .headers.getFirst("X-Request-ID")
+        val generated = checkNotNull(
+            http.getForEntity<String>("/actuator/health/liveness").headers.getFirst("X-Request-ID"),
+        ) { "Expected a generated X-Request-ID header" }
         assertThat(UUID.fromString(generated).toString()).isEqualTo(generated)
 
         for (supplied in listOf("review.request-123", "x".repeat(128), "unsafe/id", "x".repeat(129))) {
             val headers = HttpHeaders().apply { set("X-Request-ID", supplied) }
-            val response = http.exchange(
-                "/actuator/health/liveness", HttpMethod.GET, HttpEntity<Void>(headers), String::class.java,
+            val response = http.exchange<String>(
+                "/actuator/health/liveness", HttpMethod.GET, HttpEntity<Void>(headers),
             )
-            val actual = response.headers.getFirst("X-Request-ID")
+            val actual = checkNotNull(response.headers.getFirst("X-Request-ID")) {
+                "Expected an X-Request-ID response header"
+            }
             if (supplied.length <= 128 && '/' !in supplied) {
                 assertThat(actual).isEqualTo(supplied)
             } else {
@@ -81,17 +84,19 @@ class BootstrapIntegrationTest {
     fun `database outage affects readiness but not liveness and recovers`() {
         postgres.dockerClient.pauseContainerCmd(postgres.containerId).exec()
         try {
-            val readiness = http.getForEntity("/actuator/health/readiness", JsonNode::class.java)
+            val readiness = http.getForEntity<JsonNode>("/actuator/health/readiness")
             assertThat(readiness.statusCode).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
-            assertThat(readiness.body!!.path("status").asText()).isEqualTo("DOWN")
-            val liveness = http.getForEntity("/actuator/health/liveness", JsonNode::class.java)
+            val readinessBody = checkNotNull(readiness.body) { "Expected a readiness response body" }
+            assertThat(readinessBody.path("status").asText()).isEqualTo("DOWN")
+            val liveness = http.getForEntity<JsonNode>("/actuator/health/liveness")
             assertThat(liveness.statusCode).isEqualTo(HttpStatus.OK)
-            assertThat(liveness.body!!.path("status").asText()).isEqualTo("UP")
+            val livenessBody = checkNotNull(liveness.body) { "Expected a liveness response body" }
+            assertThat(livenessBody.path("status").asText()).isEqualTo("UP")
         } finally {
             postgres.dockerClient.unpauseContainerCmd(postgres.containerId).exec()
         }
         await().atMost(Duration.ofSeconds(20)).untilAsserted {
-            assertThat(http.getForEntity("/actuator/health/readiness", String::class.java).statusCode)
+            assertThat(http.getForEntity<String>("/actuator/health/readiness").statusCode)
                 .isEqualTo(HttpStatus.OK)
         }
     }

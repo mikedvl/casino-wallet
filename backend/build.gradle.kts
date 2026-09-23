@@ -16,6 +16,7 @@ repositories {
 kotlin {
     jvmToolchain(21)
     compilerOptions {
+        allWarningsAsErrors.set(true)
         freeCompilerArgs.add("-Xjsr305=strict")
     }
 }
@@ -25,8 +26,11 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    implementation("org.flywaydb:flyway-core")
     implementation(kotlin("reflect"))
+    runtimeOnly("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
+    // bootJar resolves developmentOnly independently to exclude development dependencies.
     developmentOnly(platform(SpringBootPlugin.BOM_COORDINATES))
     developmentOnly("org.springframework.boot:spring-boot-devtools")
 

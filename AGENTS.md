@@ -202,3 +202,20 @@ A stage is complete only when:
 - documentation matches actual behaviour;
 - no unrelated changes are present;
 - no next-stage functionality was implemented prematurely.
+
+## Development strategy
+
+Follow DEVELOPMENT_STRATEGY.md when implementing or reviewing application code.
+
+- For financially sensitive behaviour, follow its test-first, transaction,
+  money, concurrency and persistence guidance.
+- For frontend work, follow its TypeScript, Angular structure, naming and
+  frontend-testing guidance.
+- For API work, follow its REST, JSON, error-contract and transport guidance.
+- Do not duplicate these rules in individual stage prompts.
+
+## Code quality
+
+Do not leave new project-owned compiler, linter or actionable IDE inspection
+warnings. Fix the root cause rather than disabling the check. Any unavoidable
+targeted suppression must be narrowly scoped and justified.

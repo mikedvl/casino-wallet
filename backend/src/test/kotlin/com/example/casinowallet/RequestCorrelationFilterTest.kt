@@ -22,7 +22,9 @@ class RequestCorrelationFilterTest {
             filter.doFilter(request, response) { _, _ ->
                 assertThat(MDC.get("requestId")).isEqualTo(response.getHeader("X-Request-ID"))
             }
-            val actual = response.getHeader("X-Request-ID")
+            val actual = checkNotNull(response.getHeader("X-Request-ID")) {
+                "Expected a generated X-Request-ID response header"
+            }
             assertThat(UUID.fromString(actual).toString()).isEqualTo(actual)
             assertThat(MDC.get("requestId")).isNull()
         }

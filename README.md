@@ -4,11 +4,11 @@ A small casino wallet assignment built with Kotlin, Spring Boot, PostgreSQL and 
 
 The project is implemented in small, reviewable vertical slices with a green build required at the end of every stage.
 
-> **Current status:** repository bootstrap only.
+> **Current status:** Stage 2 — Wallet Read Vertical Slice.
 >
-> The backend currently exposes infrastructure and observability endpoints, while the frontend renders a minimal application shell.
+> Flyway creates and seeds the wallet. Spring JDBC serves its authoritative balances through `GET /api/wallet`, and Angular displays them in EUR.
 >
-> Wallet tables, financial APIs, deposits, callbacks, ledger, bonuses, rounds and translations are not implemented yet.
+> Deposits, callbacks, ledger, bonus lifecycle, rounds, wallet mutations and translations are not implemented yet.
 
 See:
 
@@ -65,11 +65,30 @@ Backend
 
 PostgreSQL
   - durable application state
-  - future financial source of truth
+  - source of truth for wallet balances
   - ACID transactions
   - database constraints
   - row locking
 ```
+
+---
+
+# Wallet Read API
+
+`GET /api/wallet` reads the single demo player's wallet. It requires no authentication, query parameters or player ID in the URL.
+
+```json
+{
+  "realBalance": "0.00",
+  "bonusBalance": "0.00"
+}
+```
+
+Both values are decimal strings with exactly two fractional digits. Angular preserves those strings and displays `Real balance` and `Bonus balance` in EUR, with loading and retry states when the backend is not yet available.
+
+Flyway runs on backend startup in both DEV and DEMO. `V1__create_wallet.sql` creates `wallet` with `player_id UUID PRIMARY KEY` and two `NUMERIC(19,2) NOT NULL DEFAULT 0.00` balances, each protected by a nonnegative `CHECK`. `V2__seed_demo_wallet.sql` inserts one demo wallet for `00000000-0000-0000-0000-000000000001` with `0.00 / 0.00`. Applied migrations are recorded in `flyway_schema_history`; restarting does not reseed or reset balances.
+
+The read path is controller → application service → Spring JDBC → PostgreSQL. No wallet writes or row locks are exposed in Stage 2.
 
 ---
 
@@ -173,6 +192,7 @@ The local `docs/` directory contains private development notes and is intentiona
 | Gradle Wrapper | `8.14.3` |
 | Kotlin | `2.2.21` |
 | Spring Boot | `3.5.16` |
+| Flyway core / PostgreSQL module | `11.7.2` (Spring Boot dependency management) |
 | Testcontainers | `1.21.4` |
 | PostgreSQL | `postgres:16.15-alpine3.23` |
 | Node builder | `node:20.20.2-alpine3.22` |
@@ -508,29 +528,19 @@ Nginx
 backend:8080
 ```
 
-No casino API exists during the bootstrap stage.
-
-Therefore:
-
-```text
-/api/*
-```
-
-currently returns `404`, which is expected.
-
-A `404` returned through the development proxy confirms that the Angular dev server reached Spring Boot successfully.
+`GET /api/wallet` returns HTTP `200` with the wallet JSON through either proxy. Unimplemented routes still return `404`.
 
 ---
 
 # IntelliJ IDEA Development Workflow
 
-Five shared profiles are stored in `.run/` and appear in **Run / Debug Configurations** when the repository root is opened in IntelliJ IDEA.
+Seven shared profiles are stored in `.run/` and appear in **Run / Debug Configurations** when the repository root is opened in IntelliJ IDEA.
 
 ## One-time IDE setup
 
 - Link `backend/build.gradle.kts` as a Gradle project and let the import finish. The backend profile uses the imported `com.example.casino-wallet.main` module.
 - Select JDK 21 as the Project SDK and Gradle JVM.
-- Select Node 20 as the project Node runtime and its npm as the project package manager. `frontend/.nvmrc` remains the CLI version reference. Run `npm ci` in `frontend/` once before starting the dev server.
+- Select Node 20 as the project Node runtime and its npm as the project package manager. `frontend/.nvmrc` remains the CLI version reference. Run `npm ci` in `frontend/` once before starting the dev server or frontend tests.
 - Configure a local Docker connection named `Docker` in **Settings → Build, Execution, Deployment → Docker**, and start the Docker daemon.
 - Configure the installed Chrome executable in **Settings → Tools → Web Browsers and Preview**. IntelliJ must have its Spring Boot, Docker, npm and JavaScript debugging support available.
 
@@ -543,6 +553,16 @@ JDK, Node, Docker socket and browser executable locations are machine-local IDE 
 | `03 - Frontend` | npm | Runs `npm run start` from `frontend/package.json`, opens `http://localhost:4200` in Chrome and starts the browser JavaScript debugger. |
 | `DEV - Full Stack` | Compound | Starts `02 - Backend` and `03 - Frontend` together. PostgreSQL is supplied by the backend prerequisite. |
 | `DEMO - Full Stack` | Docker Compose | Builds and starts `postgres`, `backend` and `frontend` from the existing `compose.yaml`, equivalent to `docker compose up --build`. |
+| `TEST - Backend` | Gradle | Runs `test` in `backend/` with the project Gradle JVM. Testcontainers supplies isolated PostgreSQL containers. |
+| `TEST - Frontend` | npm | Runs `npm test` from `frontend/package.json`: Angular unit/component tests with HTTP mocks and ChromeHeadless. |
+
+## TEST: isolated test runs
+
+**TEST - Backend → Run** executes all backend tests. **Debug** attaches to the test JVM and supports breakpoints in Kotlin tests and application code. The profile enables **Run as test**, so each launch reruns the tests even when Gradle considers them up to date. Gradle script debugging is disabled. A running Docker daemon is required; there is no Before Launch dependency on `01 - PostgreSQL` or the shared database on port `15432`.
+
+**TEST - Frontend → Run** uses the existing `test` script, which already specifies `--watch=false --browsers=ChromeHeadless`. Install Chrome locally; for a nonstandard browser location, supply `CHROME_BIN` in the local launch environment. The profile uses the project Node 20 runtime and has no backend, PostgreSQL or Docker prerequisite.
+
+For a single Kotlin test, use its gutter **Debug** action. For TypeScript test breakpoints, use the test's gutter **Debug** action with IntelliJ's Karma integration; debugging the npm process alone does not attach to browser tests. The [Karma plugin](https://www.jetbrains.com/help/idea/running-unit-tests-on-karma.html) must be installed and enabled for this workflow.
 
 ## DEV: Run, Debug and reload
 
@@ -550,7 +570,7 @@ Select **DEV - Full Stack → Run** for local development, or **Debug** for Kotl
 
 The IDEA DEV database mapping is always `127.0.0.1:15432 → postgres:5432`; port `5432` inside the container is unchanged. Existing development database defaults are reused.
 
-The frontend and backend can start in parallel, so the page may become available before backend readiness turns `UP`. Angular keeps the existing `/api` proxy to `http://localhost:8080`; bootstrap API requests return the expected backend `404`.
+The frontend and backend can start in parallel, so the page may become available before backend readiness turns `UP`. Angular keeps the existing `/api` proxy to `http://localhost:8080`; use **Retry** if the initial wallet request arrives before the backend is ready.
 
 Angular watches source files and reloads the browser. Spring Boot DevTools restarts the backend when compiled classes or resources change; use **Build Project** after backend edits. Kotlin breakpoints work directly in backend sources, and browser source maps support TypeScript breakpoints. If a startup breakpoint was passed before the browser debugger attached, reload the page.
 
@@ -716,7 +736,11 @@ curl --fail \
 
 curl --fail -i \
   -H 'X-Request-ID: reviewer-check' \
-  http://localhost:8080/actuator/info
+  http://localhost:8080/api/wallet
+
+curl --fail -i \
+  -H 'X-Request-ID: reviewer-proxy-check' \
+  http://localhost:4200/api/wallet
 
 curl --fail \
   http://localhost:4200/health
@@ -742,6 +766,8 @@ frontend  -> healthy
 ```
 
 Backend readiness verifies real PostgreSQL connectivity.
+
+Both wallet requests must return HTTP `200`, decimal strings `0.00 / 0.00` for the seeded wallet, and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database both migrations are applied.
 
 Liveness remains independent from PostgreSQL so the JVM process can remain alive and recover from a temporary database outage.
 
@@ -805,15 +831,16 @@ Open:
 http://localhost:4200
 ```
 
-During the bootstrap stage the page displays:
+The page loads the wallet from `/api/wallet` and displays:
 
 ```text
-Repository bootstrap
-
 Casino Wallet
 
-The application shell is ready.
-Wallet features will arrive in later stages.
+Real balance
+0.00 EUR
+
+Bonus balance
+0.00 EUR
 ```
 
 ## Proxy verification
@@ -821,19 +848,19 @@ Wallet features will arrive in later stages.
 ```bash
 curl -i \
   -H 'X-Request-ID: manual-proxy-test' \
-  http://localhost:4200/api/manual-check
+  http://localhost:4200/api/wallet
 ```
 
 Expected:
 
 ```text
-HTTP 404
+HTTP 200
 X-Request-ID: manual-proxy-test
+
+{"realBalance":"0.00","bonusBalance":"0.00"}
 ```
 
-The `404` is expected because business API routes do not exist yet.
-
-It confirms:
+This confirms the wallet read path through:
 
 ```text
 Angular development server
@@ -841,13 +868,15 @@ Angular development server
 proxy.conf.json
        ↓
 Spring Boot
+       ↓
+PostgreSQL
 ```
 
 ---
 
 # Reliability Strategy
 
-Financial functionality is intentionally not implemented in the bootstrap stage.
+Stage 2 implements wallet reads only. Balance-changing functionality belongs to later stages.
 
 Later financial stages follow these rules:
 
@@ -880,7 +909,7 @@ FOREIGN KEY
 append-only protections
 ```
 
-These financial tables, locks and constraints belong to later implementation stages.
+The wallet already has a primary key, required balances and nonnegative checks. Ledger protections, related financial tables and wallet write locks belong to later stages.
 
 ---
 
@@ -888,15 +917,13 @@ These financial tables, locks and constraints belong to later implementation sta
 
 Financial state uses strong consistency.
 
-PostgreSQL will be the single source of truth for:
+PostgreSQL is the single source of truth for real and bonus balances. Later stages will also store:
 
-- real balance;
-- bonus balance;
 - wagering progress;
 - deposit state;
 - durable callback idempotency.
 
-The future `wallet` table will contain the only mutable current real and bonus balances.
+The `wallet` table contains the current real and bonus balances. Stage 2 exposes only reads.
 
 The ledger will be append-only history written in the same transaction as each balance change.
 

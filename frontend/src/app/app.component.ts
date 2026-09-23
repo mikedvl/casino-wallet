@@ -1,13 +1,14 @@
 import { Component } from '@angular/core';
+import { WalletPageComponent } from './wallet/wallet-page.component';
 
 @Component({
   selector: 'app-root',
   standalone: true,
+  imports: [WalletPageComponent],
   template: `
     <main>
-      <p class="status">Repository bootstrap</p>
       <h1>Casino Wallet</h1>
-      <p>The application shell is ready. Wallet features will arrive in later stages.</p>
+      <app-wallet-page />
     </main>
   `,
 })
