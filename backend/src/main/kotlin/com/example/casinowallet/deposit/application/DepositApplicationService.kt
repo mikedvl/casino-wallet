@@ -5,6 +5,7 @@ import com.example.casinowallet.deposit.domain.Deposit
 import com.example.casinowallet.deposit.domain.DepositStatus
 import com.example.casinowallet.deposit.persistence.JdbcDepositRepository
 import com.example.casinowallet.ledger.persistence.JdbcLedgerRepository
+import com.example.casinowallet.wallet.application.WalletBalanceLimitException
 import com.example.casinowallet.wallet.persistence.JdbcWalletRepository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Isolation
@@ -46,4 +47,3 @@ data class DepositCompletion(val depositId: UUID, val duplicate: Boolean)
 
 class DepositNotFoundException : RuntimeException()
 class DepositAmountMismatchException : RuntimeException()
-class WalletBalanceLimitException : RuntimeException()

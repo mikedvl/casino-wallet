@@ -2,9 +2,9 @@ package com.example.casinowallet.deposit
 
 import com.example.casinowallet.CasinoWalletApplication
 import com.example.casinowallet.deposit.application.DepositApplicationService
+import com.example.casinowallet.support.PostgresLockProbe
 import com.fasterxml.jackson.databind.JsonNode
 import org.assertj.core.api.Assertions.assertThat
-import org.awaitility.Awaitility.await
 import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -33,7 +33,6 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.math.BigDecimal
-import java.time.Duration
 import java.util.HexFormat
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -133,37 +132,10 @@ class DepositLedgerIntegrationTest @Autowired constructor(
         try {
             dataSource.connection.use { blocker ->
                 blocker.autoCommit = false
-                val blockerPid = blocker.prepareStatement(
-                    // language=PostgreSQL
-                    "select pg_backend_pid() from wallet where player_id = ? for update",
-                ).use { statement ->
-                    statement.setObject(1, DEMO_PLAYER_ID)
-                    statement.executeQuery().use { row ->
-                        check(row.next()) { "Expected the demo wallet row to lock" }
-                        row.getInt(1)
-                    }
-                }
+                val blockerPid = PostgresLockProbe.lockWallet(blocker, DEMO_PLAYER_ID)
                 val callbacks = List(2) { executor.submit<ResponseEntity<JsonNode>> { callback(id, "2500") } }
                 try {
-                    await().atMost(Duration.ofSeconds(10)).untilAsserted {
-                        // A waiter can queue behind another callback, so follow the full blocking chain.
-                        val waiting = jdbc.queryForObject(
-                            // language=PostgreSQL
-                            """
-                            with recursive blocking_tree(pid) as (
-                                select ?::integer
-                                union
-                                select waiting.pid
-                                from pg_stat_activity waiting
-                                join blocking_tree blocker on blocker.pid = any(pg_blocking_pids(waiting.pid))
-                                where waiting.datname = current_database() and waiting.wait_event_type = 'Lock'
-                            )
-                            select count(*) from blocking_tree where pid <> ?
-                            """.trimIndent(),
-                            Long::class.java, blockerPid, blockerPid,
-                        )
-                        assertThat(waiting).isEqualTo(2L)
-                    }
+                    PostgresLockProbe.awaitBlockedSessions(jdbc, blockerPid, 2)
                     dataSource.connection.use { probe ->
                         probe.autoCommit = false
                         try {

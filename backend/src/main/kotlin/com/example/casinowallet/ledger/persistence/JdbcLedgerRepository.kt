@@ -22,6 +22,25 @@ class JdbcLedgerRepository(private val jdbc: NamedParameterJdbcTemplate) {
         )
     }
 
+    fun appendRoundStake(playerId: UUID, roundId: UUID, stake: BigDecimal, balanceAfter: BigDecimal) =
+        appendRound(playerId, roundId, "ROUND_STAKE", stake.negate(), balanceAfter)
+
+    fun appendRoundWin(playerId: UUID, roundId: UUID, win: BigDecimal, balanceAfter: BigDecimal) =
+        appendRound(playerId, roundId, "ROUND_WIN", win, balanceAfter)
+
+    private fun appendRound(playerId: UUID, roundId: UUID, operation: String, amount: BigDecimal, balanceAfter: BigDecimal) {
+        jdbc.update(
+            // language=PostgreSQL
+            """
+            insert into ledger_entry
+                (id, player_id, wallet_type, operation_type, amount, balance_after, reference_type, reference_id)
+            values (:id, :playerId, 'REAL', :operation, :amount, :balanceAfter, 'GAME_ROUND', :roundId)
+            """.trimIndent(),
+            mapOf("id" to UUID.randomUUID(), "playerId" to playerId, "roundId" to roundId,
+                "operation" to operation, "amount" to amount, "balanceAfter" to balanceAfter),
+        )
+    }
+
     fun findPage(playerId: UUID, offset: Long, size: Int): List<LedgerEntry> = jdbc.query(
         // language=PostgreSQL
         """

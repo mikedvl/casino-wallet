@@ -4,11 +4,11 @@ A small casino wallet assignment built with Kotlin, Spring Boot, PostgreSQL and 
 
 The project is implemented in small, reviewable vertical slices with a green build required at the end of every stage.
 
-> **Current status:** Stage 3 — Deposits and Append-Only Ledger.
+> **Current status:** Stage 4 — Atomic Game Rounds and Concurrency.
 >
-> Pending deposits are completed by signed provider callbacks. PostgreSQL atomically stores the real balance credit, deposit completion and immutable ledger history. Angular displays the authoritative wallet balances in EUR.
+> Signed provider callbacks complete deposits idempotently. Real-money game rounds debit a stake and settle a deterministic payout in one PostgreSQL transaction, with wallet row locking and immutable ledger history. Angular displays the authoritative wallet balances in EUR.
 >
-> Bonus lifecycle, rounds, wagering, deposit/ledger UI and translations are not implemented yet.
+> Bonus lifecycle, mixed funds, wagering, deposit/round/ledger UI and translations are not implemented yet.
 
 See:
 
@@ -88,7 +88,7 @@ Both values are decimal strings with exactly two fractional digits. Angular pres
 
 Flyway runs on backend startup in both DEV and DEMO. `V1__create_wallet.sql` creates `wallet` with `player_id UUID PRIMARY KEY` and two `NUMERIC(19,2) NOT NULL DEFAULT 0.00` balances, each protected by a nonnegative `CHECK`. `V2__seed_demo_wallet.sql` inserts one demo wallet for `00000000-0000-0000-0000-000000000001` with `0.00 / 0.00`. Applied migrations are recorded in `flyway_schema_history`; restarting does not reseed or reset balances.
 
-The read path is controller → application service → Spring JDBC → PostgreSQL. Completed deposits update the real balance; the bonus balance is unchanged. Reload the page to read the latest committed balances.
+The read path is controller → application service → Spring JDBC → PostgreSQL. Completed deposits, round stakes and round payouts update the real balance; the bonus balance is unchanged. Reload the page to read the latest committed balances.
 
 ---
 
@@ -177,9 +177,59 @@ Errors use a safe Problem Detail response with a stable `code` and propagated `X
 curl --fail-with-body 'http://localhost:4200/api/ledger?page=0&size=20'
 ```
 
-The response contains `items`, `page`, `size`, `totalElements` and `totalPages`. Each item contains `id`, `walletType` (`REAL`), `operationType` (`DEPOSIT_COMPLETED`), `amount`, `balanceAfter`, `referenceType` (`DEPOSIT`), `referenceId` and UTC `createdAt`. Both money fields are two-decimal strings.
+The response contains `items`, `page`, `size`, `totalElements` and `totalPages`. Each item contains `id`, `walletType` (`REAL`), `operationType` (`DEPOSIT_COMPLETED`, `ROUND_STAKE` or `ROUND_WIN`), `amount`, `balanceAfter`, `referenceType` (`DEPOSIT` or `GAME_ROUND`), `referenceId` and UTC `createdAt`. Both money fields are two-decimal strings. Round stake amounts are negative, for example `"-8.00"`; deposits and round payouts are positive.
 
-Pages start at zero; the default size is 20 and the maximum is 100. Empty/out-of-range pages return an empty `items` array with the actual totals. SQL sorts by `created_at DESC, id DESC`, backed by a matching player/history index. Items and totals use one read-only PostgreSQL snapshot per request; separate page requests can naturally observe newly committed deposits.
+Pages start at zero; the default size is 20 and the maximum is 100. Empty/out-of-range pages return an empty `items` array with the actual totals. SQL sorts by `created_at DESC, id DESC`, backed by a matching player/history index. Items and totals use one read-only PostgreSQL snapshot per request; separate page requests can naturally observe newly committed deposits or rounds.
+
+---
+
+# Atomic Real-Money Rounds API
+
+`POST /api/rounds/play` plays and settles one synchronous round for the same seeded demo player. Both input amounts must be plain decimal **strings** with at most two fractional digits and a maximum of `99999999999999999.99`. Stake must be positive; total payout may be zero. `"8"` normalizes to `"8.00"`; values such as `"8.001"`, negative amounts, exponents and JSON numbers are rejected without rounding.
+
+With a real balance of `10.00`, funded through the deposit/callback API:
+
+```bash
+curl --fail-with-body -i http://localhost:4200/api/rounds/play \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: round-example' \
+  --data-binary '{"stake":"4.00","totalWin":"10.00"}'
+```
+
+HTTP `200`:
+
+```json
+{"roundId":"<server-generated UUID>","stake":"4.00","totalWin":"10.00","realBalance":"16.00","bonusBalance":"0.00"}
+```
+
+`totalWin` is deterministic demo input representing **total payout**, not net profit: `10.00 - 4.00 + 10.00 = 16.00`. There is no randomness or external game provider. Production payout authority would belong to a trusted provider, outside this assignment. Each accepted play request creates a new round; no round idempotency key is defined.
+
+The application service owns one `READ_COMMITTED` transaction:
+
+1. Lock the wallet and read its balances with `SELECT ... FOR UPDATE`.
+2. Check that the current real balance covers the complete stake.
+3. Debit real money with `UPDATE ... RETURNING real_balance` and append `ROUND_STAKE` with a negative amount and the resulting `balance_after`.
+4. Insert the `game_round` with its stake and total payout.
+5. For a positive payout, credit real money with `UPDATE ... RETURNING real_balance` and append `ROUND_WIN` with a positive amount and its resulting `balance_after`.
+6. Commit before logging or returning success.
+
+A zero payout produces no credit and no `ROUND_WIN` row. For the example above the two round ledger entries are `-4.00 / balanceAfter 6.00` and `+10.00 / balanceAfter 16.00`. Wallet, round and both ledger entries commit or roll back together, including on commit-time failure. Rounds lock only the wallet; deposit callbacks retain their existing **wallet → deposit** lock order. The ledger remains audit history; current balances are always read from the wallet.
+
+| Status | Code | Result |
+|---|---|---|
+| 400 | `INVALID_ROUND_AMOUNT` | Invalid stake or totalWin; no financial writes |
+| 400 | `INVALID_REQUEST` | Malformed JSON/request; no financial writes |
+| 409 | `INSUFFICIENT_FUNDS` | Real balance cannot cover stake, even if the proposed payout would cover it; no round, ledger entry or balance change |
+| 409 | `WALLET_BALANCE_LIMIT` | Payout would overflow `NUMERIC(19,2)`; the complete round rolls back |
+| 500 | `INTERNAL_ERROR` | Technical failure; the complete round rolls back and internal details remain private |
+
+`V4__create_game_rounds.sql` extends the schema without changing V1–V3. `game_round` contains only `id UUID PRIMARY KEY`, `player_id UUID NOT NULL REFERENCES wallet`, `stake NUMERIC(19,2) NOT NULL`, `total_win NUMERIC(19,2) NOT NULL` and `created_at TIMESTAMPTZ NOT NULL`. Database checks require positive stake and nonnegative payout within the money range. There is no pending/settled state for synchronous rounds.
+
+V4 extends the existing ledger constraints: deposit credits reference `DEPOSIT` and remain positive; `ROUND_STAKE` and `ROUND_WIN` reference `GAME_ROUND` and must be negative and positive respectively. Zero entries and `BONUS` wallet type remain forbidden. The existing unique business-operation key, balance constraints and append-only trigger are preserved; ledger `UPDATE`, `DELETE` and `TRUNCATE` remain rejected.
+
+PostgreSQL integration tests fund the wallet through signed deposits and prove that two concurrent `8.00` losing bets against `10.00` produce exactly one success and one `INSUFFICIENT_FUNDS` response, leaving `2.00`, one round and one stake entry. A controlled transaction holds the wallet row lock; bounded polling follows `pg_blocking_pids` from its known backend PID to prove that both requests actually wait in PostgreSQL. No SQL-text matching or timing-only concurrency proof is used. Tests also verify rollback and `sum(REAL ledger amounts) = wallet.real_balance`.
+
+Stage 4 uses real money only: the entire stake and payout belong to real balance. Bonus handling, the active-bonus EUR `5.00` restriction and mixed real/bonus allocation belong to Stage 5 and are not implemented. The Angular round form belongs to the later frontend stage; the existing wallet page continues to display backend balances.
 
 ---
 
@@ -854,9 +904,11 @@ frontend  -> healthy
 
 Backend readiness verifies real PostgreSQL connectivity.
 
-Both wallet requests must return HTTP `200`, decimal strings (`0.00 / 0.00` on a fresh database), and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database V1–V3 are applied. Existing volumes retain their balances and history.
+Both wallet requests must return HTTP `200`, decimal strings (`0.00 / 0.00` on a fresh database), and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database V1–V4 are applied. Existing volumes retain their balances and history.
 
 Before shutting down the stack, also exercise the deposit examples above: creation leaves balances/history unchanged; the signed callback credits exactly once; a duplicate remains successful; an invalid signature returns `401`; a freshly signed mismatched amount returns `409`. Verify the resulting wallet and ledger through Nginx, restart the backend and retry the matching callback to verify durable idempotency. These operations intentionally persist demo history; do not delete the PostgreSQL volume to reset it. Automated financial/schema tests use disposable Testcontainers databases instead.
+
+For the Stage 4 financial smoke on a fresh wallet, create a `10.00` deposit and verify that the pending deposit leaves the wallet at `0.00`. Complete it with a signed `amountCents: 1000` callback, then verify `10.00` and one deposit ledger entry. Play `{"stake":"8.00","totalWin":"0.00"}` through Nginx and verify HTTP `200`, wallet `2.00 / 0.00`, one `ROUND_STAKE` entry of `-8.00` with `balanceAfter: "2.00"`, and no `ROUND_WIN`. Check the supplied `X-Request-ID` on wallet, round and ledger responses and confirm that all services remain healthy. If the volume already contains financial history, record its reconciled opening balance and account for these new mutations; never prepare the scenario by editing wallet balances directly. The mandatory simultaneous `8.00 + 8.00` contention proof runs in automated PostgreSQL integration tests.
 
 Liveness remains independent from PostgreSQL so the JVM process can remain alive and recover from a temporary database outage.
 
@@ -965,7 +1017,7 @@ PostgreSQL
 
 # Reliability Strategy
 
-Stage 3 implements real-balance deposit credits. Financial writes follow these rules:
+Stage 4 implements real-balance deposit credits and synchronous real-money rounds. Financial writes follow these rules:
 
 - PostgreSQL is the only durable transactional system.
 - Each balance-changing use case executes in one application-service transaction.
@@ -996,7 +1048,7 @@ FOREIGN KEY
 append-only protections
 ```
 
-The wallet has a primary key, required balances and nonnegative checks. Deposit/ledger constraints, unique financial operations, append-only enforcement and wallet-first row locks protect the implemented deposit flow.
+The wallet has a primary key, required balances and nonnegative checks. Deposit/round constraints, signed ledger checks, unique financial operations, append-only enforcement and wallet-first row locks protect the implemented financial flows.
 
 ---
 
@@ -1006,7 +1058,7 @@ Financial state uses strong consistency.
 
 PostgreSQL is the single source of truth for real and bonus balances, deposit state and durable callback idempotency. Wagering belongs to a later stage.
 
-The `wallet` table contains the current real and bonus balances. Deposit completion credits the real balance only.
+The `wallet` table contains the current real and bonus balances. Deposit completion, round stakes and round payouts affect real balance only.
 
 The ledger is append-only history written in the same transaction as each balance change; the wallet remains the authoritative current state.
 

@@ -46,7 +46,7 @@ class WalletReadIntegrationTest @Autowired constructor(
             // language=PostgreSQL
             "select table_name from information_schema.tables where table_schema = 'public'",
         )
-        assertThat(tables).containsExactlyInAnyOrder("wallet", "deposit", "ledger_entry", "flyway_schema_history")
+        assertThat(tables).containsExactlyInAnyOrder("wallet", "deposit", "ledger_entry", "game_round", "flyway_schema_history")
         val failedMigrations = jdbc.queryForObject<Long>(
             // language=PostgreSQL
             "select count(*) from flyway_schema_history where success = false",

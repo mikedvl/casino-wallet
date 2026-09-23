@@ -8,14 +8,23 @@ import java.util.UUID
 
 @Repository
 class JdbcWalletRepository(private val jdbc: NamedParameterJdbcTemplate) {
-    fun lockByPlayerId(playerId: UUID) {
-        checkNotNull(jdbc.queryForObject(
+    fun lockByPlayerId(playerId: UUID): WalletSummary = checkNotNull(
+        jdbc.queryForObject(
             // language=PostgreSQL
-            "select player_id from wallet where player_id = :playerId for update",
+            "select real_balance, bonus_balance from wallet where player_id = :playerId for update",
             mapOf("playerId" to playerId),
-            UUID::class.java,
-        ))
-    }
+        ) { row, _ -> WalletSummary(row.getBigDecimal("real_balance"), row.getBigDecimal("bonus_balance")) },
+    )
+
+    fun debitRealBalance(playerId: UUID, amount: BigDecimal): BigDecimal? = jdbc.query(
+        // language=PostgreSQL
+        """
+        update wallet set real_balance = real_balance - :amount
+        where player_id = :playerId and real_balance >= :amount
+        returning real_balance
+        """.trimIndent(),
+        mapOf("playerId" to playerId, "amount" to amount),
+    ) { row, _ -> row.getBigDecimal("real_balance") }.singleOrNull()
 
     fun creditRealBalance(playerId: UUID, amount: BigDecimal): BigDecimal? = jdbc.query(
         // language=PostgreSQL

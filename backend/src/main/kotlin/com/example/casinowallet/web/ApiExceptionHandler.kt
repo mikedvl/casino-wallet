@@ -2,8 +2,9 @@ package com.example.casinowallet.web
 
 import com.example.casinowallet.deposit.application.DepositAmountMismatchException
 import com.example.casinowallet.deposit.application.DepositNotFoundException
-import com.example.casinowallet.deposit.application.WalletBalanceLimitException
 import com.example.casinowallet.ledger.application.InvalidLedgerPageException
+import com.example.casinowallet.round.application.InsufficientFundsException
+import com.example.casinowallet.wallet.application.WalletBalanceLimitException
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
@@ -38,6 +39,10 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
     @ExceptionHandler(InvalidLedgerPageException::class)
     fun invalidPage(): ProblemDetail =
         problem(HttpStatus.BAD_REQUEST, "INVALID_PAGINATION", "Page must be nonnegative and size must be between 1 and 100")
+
+    @ExceptionHandler(InsufficientFundsException::class)
+    fun insufficientFunds(): ProblemDetail =
+        problem(HttpStatus.CONFLICT, "INSUFFICIENT_FUNDS", "Insufficient real balance for the stake")
 
     @ExceptionHandler(Exception::class)
     fun unexpected(exception: Exception): ProblemDetail {
