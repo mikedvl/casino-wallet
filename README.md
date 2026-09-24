@@ -2,7 +2,7 @@
 
 Casino wallet application built with Kotlin, Spring Boot, PostgreSQL 16, Angular 17 and Docker Compose.
 
-The project implements transactional real/bonus balances, deposits, welcome-bonus lifecycle, mixed-funds betting, an append-only ledger, concurrency protection and full operational observability.
+The project implements transactional real/bonus balances, deposits, welcome-bonus lifecycle, mixed-funds betting, an append-only ledger, concurrency protection and operational observability.
 
 <a href="assets/architecture/casino-wallet-observability-architecture.png">
   <img
@@ -15,7 +15,7 @@ The project implements transactional real/bonus balances, deposits, welcome-bonu
 
 ### Docker
 
-Required to run the containerized application:
+Required for the containerized application:
 
 - Docker Engine or Docker Desktop
 - Docker Compose v2 with `up --wait` and `--wait-timeout`
@@ -85,7 +85,7 @@ Reset local demo data:
 
 ### Full Stack with Observability
 
-Start the application together with the complete monitoring stack:
+Start the application together with the complete observability infrastructure:
 
 ```bash
 ./scripts/start-observability.sh
@@ -105,40 +105,36 @@ Stop only observability services while keeping Casino Wallet running:
 ./scripts/start-observability.sh stop
 ```
 
-Detailed observability architecture, queries and troubleshooting are documented in [OBSERVABILITY.md](OBSERVABILITY.md).
+Detailed observability architecture, dashboards, log queries, tracing and troubleshooting are documented in [OBSERVABILITY.md](OBSERVABILITY.md).
 
-## Run from IntelliJ IDEA
+### IntelliJ IDEA
 
 Shared Run Configurations are stored in `.run/`.
 
 | Configuration | Purpose |
 |---|---|
-| `DEV - Full Stack` | Local backend + frontend with debugging and reload |
+| `01 - PostgreSQL` | PostgreSQL only |
+| `02 - Backend` | Local Spring Boot + PostgreSQL |
+| `03 - Frontend` | Angular development server + browser debugging |
+| `DEV - Full Stack` | Local backend + frontend |
 | `DEMO - Full Stack` | PostgreSQL + backend + frontend in Docker |
-| `OBSERVABILITY - Full Stack` | Complete application and observability stack |
+| `OBSERVABILITY - Full Stack` | Complete ten-service environment |
 | `TEST - Backend` | Backend tests |
-| `TEST - Frontend` | Frontend tests |
+| `TEST - Frontend` | Frontend tests in ChromeHeadless |
 
-To start from IntelliJ IDEA:
+To run a workflow:
 
-1. Open **Run → Edit Configurations** or use the configuration selector in the top toolbar.
-2. Select the required configuration.
-3. Press **Run**.
+1. Select the required configuration in the IntelliJ toolbar.
+2. Press **Run** or **Debug** where applicable.
 
-For normal development:
+Typical choices:
 
-`DEV - Full Stack`
+- development: `DEV - Full Stack`
+- containerized application: `DEMO - Full Stack`
+- complete infrastructure: `OBSERVABILITY - Full Stack`
+- tests: `TEST - Backend` / `TEST - Frontend`
 
-For the containerized application:
-
-`DEMO - Full Stack`
-
-For the complete application with Prometheus, Grafana, Elasticsearch, Kibana, Filebeat, OpenTelemetry Collector and Jaeger:
-
-`OBSERVABILITY - Full Stack`
-
-No additional services need to be started manually.
-
+`OBSERVABILITY - Full Stack` starts the complete application and observability environment; no additional services need to be started manually.
 
 ### Native Docker Compose
 
@@ -180,7 +176,7 @@ No `.env` file is required. Local defaults can be overridden through shell varia
 - English and Ukrainian UI
 - Metrics, centralized logs and distributed tracing
 
-For detailed business assumptions and interpretation decisions, see [NOTES.md](NOTES.md).
+For business assumptions and interpretation decisions, see [NOTES.md](NOTES.md).
 
 ---
 
@@ -198,7 +194,7 @@ Kotlin / Spring Boot
 PostgreSQL 16
 ```
 
-The core runtime contains three services:
+The core runtime consists of:
 
 ```text
 postgres
@@ -226,13 +222,13 @@ PostgreSQL is the source of truth for financial state.
 | PostgreSQL | 16.15 |
 | Nginx | 1.28.2 |
 
-Exact dependency and image versions are defined in the project build and container configuration.
+Exact dependency and image versions are defined in the build and container configuration.
 
 ---
 
 ## Development
 
-### CLI
+For local development, PostgreSQL runs in Docker while backend and frontend run locally.
 
 Start PostgreSQL:
 
@@ -257,39 +253,19 @@ npm start
 
 Use JDK 21 and Node 20.
 
-### IntelliJ IDEA
-
-Shared configurations are stored in `.run/`.
-
-| Configuration | Purpose |
-|---|---|
-| `01 - PostgreSQL` | PostgreSQL only |
-| `02 - Backend` | Local Spring Boot + PostgreSQL |
-| `03 - Frontend` | Angular development server |
-| `DEV - Full Stack` | Local backend + frontend |
-| `DEMO - Full Stack` | Three-service Docker application |
-| `OBSERVABILITY - Full Stack` | Complete ten-service environment |
-| `TEST - Backend` | Backend tests |
-| `TEST - Frontend` | Frontend tests |
-
-To start the complete application with observability from IntelliJ:
-
-1. Select `OBSERVABILITY - Full Stack`.
-2. Press **Run**.
-
-No additional services need to be started manually.
+The Angular development server proxies relative `/api` requests to the local backend.
 
 ---
 
 ## Verification
 
-Run:
+Run the complete local verification pipeline from the repository root:
 
 ```bash
 ./scripts/verify.sh
 ```
 
-The verification pipeline runs:
+It runs:
 
 ```text
 Backend
@@ -329,7 +305,7 @@ Money is transferred through the API as decimal strings.
 
 Provider callback signatures use HMAC-SHA256 over the **exact raw request body**.
 
-The demo completion endpoint takes no monetary input and exposes no provider signing secret to the browser.
+The demo completion endpoint takes no monetary input, exposes no provider signing secret to the browser and does not collect a real payment.
 
 Errors use Spring `ProblemDetail` with stable machine-readable codes.
 
@@ -349,7 +325,7 @@ Wallet-changing operations use:
 SELECT ... FOR UPDATE
 ```
 
-The lock order is:
+Lock order:
 
 ```text
 wallet
@@ -359,9 +335,9 @@ related deposit when required
 
 Wallet, ledger and related deposit/bonus/round state commit or roll back together.
 
-Wallet mutations use `UPDATE ... RETURNING`, and every non-zero balance change has a corresponding ledger entry.
+Wallet mutations use `UPDATE ... RETURNING`.
 
-The ledger is append-only at the database level.
+Every non-zero balance change has a corresponding ledger entry, and the ledger is append-only at the database level.
 
 ### Concurrency
 
@@ -388,7 +364,7 @@ The test verifies actual PostgreSQL lock contention rather than relying only on 
 
 ## Observability
 
-The full stack provides:
+The project includes:
 
 ```text
 Metrics   → Prometheus → Grafana
@@ -396,17 +372,11 @@ Logs      → Filebeat → Elasticsearch → Kibana
 Traces    → OpenTelemetry Collector → Jaeger
 ```
 
-Request and trace correlation use:
-
-```text
-X-Request-ID / request_id
-trace_id
-span_id
-```
+Request and trace correlation use `X-Request-ID`, `trace_id` and `span_id`.
 
 Observability failures do not participate in financial transactions.
 
-For startup instructions, dashboards, log queries, tracing, correlation, security and troubleshooting, see:
+For architecture, dashboards, queries, tracing, security and troubleshooting, see:
 
 **[OBSERVABILITY.md](OBSERVABILITY.md)**
 
@@ -437,7 +407,7 @@ A production deployment should upgrade Angular to a currently supported release.
 
 ## Documentation
 
-- [NOTES.md](NOTES.md) — business assumptions and implementation decisions
-- [OBSERVABILITY.md](OBSERVABILITY.md) — metrics, logs and distributed tracing
+- [NOTES.md](NOTES.md) — assumptions and implementation decisions
+- [OBSERVABILITY.md](OBSERVABILITY.md) — metrics, centralized logs and distributed tracing
 - [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) — implementation roadmap
 - [DEVELOPMENT_STRATEGY.md](DEVELOPMENT_STRATEGY.md) — engineering and testing approach
