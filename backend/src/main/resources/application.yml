@@ -22,12 +22,18 @@ server:
     include-stacktrace: never
 
 management:
+  tracing:
+    enabled: false
+  otlp:
+    tracing:
+      export:
+        enabled: false
   endpoints:
     access:
       default: none
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
       discovery:
         enabled: false
     jmx:
@@ -52,6 +58,13 @@ management:
       access: read-only
     metrics:
       access: read-only
+    prometheus:
+      access: read-only
+
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
 
 logging:
   pattern:

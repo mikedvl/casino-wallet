@@ -6,6 +6,7 @@ import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.boot.test.web.client.exchange
 import org.springframework.boot.test.web.client.getForEntity
@@ -26,6 +27,7 @@ import java.util.UUID
 
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @Testcontainers
+@AutoConfigureObservability(tracing = false)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class BootstrapIntegrationTest @Autowired constructor(
     private val http: TestRestTemplate,
@@ -52,10 +54,19 @@ class BootstrapIntegrationTest @Autowired constructor(
         assertThat(metricsBody.path("names").map { it.asText() }).contains("jvm.memory.used")
         assertThat(http.getForEntity<String>("/actuator/info").statusCode).isEqualTo(HttpStatus.OK)
 
-        for (endpoint in listOf("env", "configprops", "beans", "heapdump", "prometheus")) {
+        for (endpoint in listOf("env", "configprops", "beans", "heapdump", "threaddump")) {
             assertThat(http.getForEntity<String>("/actuator/$endpoint").statusCode)
                 .isEqualTo(HttpStatus.NOT_FOUND)
         }
+    }
+
+    @Test
+    fun `prometheus exposes framework and bounded application metrics`() {
+        val response = http.getForEntity<String>("/actuator/prometheus")
+        assertThat(response.statusCode).isEqualTo(HttpStatus.OK)
+        assertThat(response.headers.contentType.toString()).contains("text/plain")
+        assertThat(response.body).contains("jvm_memory_used_bytes", "casino_wallet_rounds_total",
+            "casino_wallet_readiness 1.0")
     }
 
     @Test
@@ -94,6 +105,7 @@ class BootstrapIntegrationTest @Autowired constructor(
             assertThat(liveness.statusCode).isEqualTo(HttpStatus.OK)
             val livenessBody = checkNotNull(liveness.body) { "Expected a liveness response body" }
             assertThat(livenessBody.path("status").asText()).isEqualTo("UP")
+            assertThat(http.getForEntity<String>("/actuator/prometheus").body).contains("casino_wallet_readiness 0.0")
         } finally {
             postgres.dockerClient.unpauseContainerCmd(postgres.containerId).exec()
         }

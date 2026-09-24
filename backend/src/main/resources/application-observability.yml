@@ -1,0 +1,40 @@
+spring:
+  main:
+    banner-mode: off
+
+management:
+  tracing:
+    enabled: true
+    sampling:
+      probability: 1.0
+    propagation:
+      type: W3C
+    baggage:
+      enabled: false
+    opentelemetry:
+      export:
+        max-queue-size: 512
+        max-batch-size: 128
+        schedule-delay: 5s
+        timeout: 3s
+  otlp:
+    tracing:
+      export:
+        enabled: true
+      endpoint: http://otel-collector:4318/v1/traces
+      transport: http
+      connect-timeout: 1s
+      timeout: 2s
+
+logging:
+  structured:
+    format:
+      console: ecs
+    ecs:
+      service:
+        name: backend
+    json:
+      rename:
+        requestId: request_id
+        traceId: trace_id
+        spanId: span_id

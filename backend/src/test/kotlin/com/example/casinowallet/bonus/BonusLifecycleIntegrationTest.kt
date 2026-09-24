@@ -2,6 +2,7 @@ package com.example.casinowallet.bonus
 
 import com.example.casinowallet.config.DemoPlayer
 import com.example.casinowallet.support.PostgresLockProbe
+import io.micrometer.core.instrument.MeterRegistry
 import com.fasterxml.jackson.databind.JsonNode
 import org.assertj.core.api.Assertions.assertThat
 import org.flywaydb.core.Flyway
@@ -60,6 +61,7 @@ class BonusLifecycleIntegrationTest @Autowired constructor(
     private val flyway: Flyway,
     private val dataSource: DataSource,
     private val clock: TestClock,
+    private val metrics: MeterRegistry,
 ) {
     @BeforeEach
     fun resetIsolatedDatabase() {
@@ -289,7 +291,10 @@ class BonusLifecycleIntegrationTest @Autowired constructor(
         clock.now = EXPIRES_AT
         val before = snapshot()
         installLifecycleFailure()
+        val counter = metrics.get("casino.wallet.bonus.lifecycle").tag("outcome", status.lowercase()).counter()
+        val countBefore = counter.count()
         assertError(request("/api/wallet", HttpMethod.GET), HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR")
+        assertThat(counter.count()).isEqualTo(countBefore)
         assertThat(jdbc.queryForObject<Boolean>("select is_called from lifecycle_failure_observed")).isTrue()
         assertThat(snapshot()).isEqualTo(before)
         assertState("20.00", "20.00", "ACTIVE")
@@ -303,6 +308,9 @@ class BonusLifecycleIntegrationTest @Autowired constructor(
         jdbc.execute("drop function fail_lifecycle_commit()")
         wallet()
         assertState(if (status == "COMPLETED") "40.00" else "20.00", "0.00", status)
+        assertThat(counter.count()).isEqualTo(countBefore + 1)
+        wallet()
+        assertThat(counter.count()).isEqualTo(countBefore + 1)
     }
 
     @Test

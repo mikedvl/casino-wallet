@@ -13,7 +13,8 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE)
+// Inside Spring's HTTP observation filter, so the completion log retains trace MDC.
+@Order(Ordered.HIGHEST_PRECEDENCE + 2)
 class RequestCorrelationFilter : OncePerRequestFilter() {
     private val log = LoggerFactory.getLogger(javaClass)
     private val safeRequestId = Regex("[A-Za-z0-9._-]{1,128}")

@@ -1,0 +1,80 @@
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      labels.dedot: true
+      templates:
+        - condition:
+            and:
+              - equals:
+                  # Autodiscovery retains dotted labels; project.* labels put the project value under .value.
+                  docker.container.labels.com.docker.compose.project.value: ${CASINO_COMPOSE_PROJECT}
+              - or:
+                  - equals:
+                      docker.container.labels.com.docker.compose.service: backend
+                  - equals:
+                      docker.container.labels.com.docker.compose.service: frontend
+          config:
+            - type: filestream
+              id: casino-${data.docker.container.id}
+              paths:
+                - /var/lib/docker/containers/${data.docker.container.id}/*-json.log
+              parsers:
+                - container:
+                    format: docker
+                    stream: all
+              prospector.scanner.fingerprint.length: 256
+              processors:
+                - add_fields:
+                    target: service
+                    fields:
+                      name: ${data.docker.container.labels.com.docker.compose.service}
+
+processors:
+  - decode_json_fields:
+      when.regexp.message: '^\{'
+      fields: [message]
+      target: ""
+      overwrite_keys: true
+      add_error_key: true
+  - dissect:
+      when.regexp.message: '^event='
+      tokenizer: 'event=%{event_name} %{?details}'
+      field: message
+      target_prefix: ""
+      ignore_failure: true
+  - include_fields:
+      # Filebeat always preserves its root @timestamp; listing it here duplicates the JSON key.
+      fields: ["service", "log", "message", "request_id", "trace_id", "span_id", "event_name", "method", "path", "status", "duration", "upstream_duration", "error", "container", "stream"]
+
+setup.ilm.enabled: false
+setup.template.name: casino-wallet-logs
+setup.template.pattern: casino-wallet-logs-*
+setup.template.settings:
+  index.number_of_shards: 1
+  index.number_of_replicas: 0
+setup.template.append_fields:
+  - name: request_id
+    type: keyword
+  - name: trace_id
+    type: keyword
+  - name: span_id
+    type: keyword
+  - name: event_name
+    type: keyword
+  - name: status
+    type: integer
+  - name: duration
+    type: double
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: casino-wallet-logs-%{+yyyy.MM.dd}
+  backoff.init: 2s
+  backoff.max: 60s
+queue.disk:
+  max_size: 256MB
+logging.level: info
+logging.metrics.enabled: false
+logging.event_data.files:
+  path: /usr/share/filebeat/data/logs
+  keepfiles: 2
+  rotateeverybytes: 1048576

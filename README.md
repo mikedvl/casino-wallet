@@ -23,7 +23,7 @@ From the repository root:
 - **Stop and preserve financial/demo history:** `./scripts/start-demo.sh stop`
 - **Intentionally reset local demo data:** `./scripts/start-demo.sh reset`
 
-Reset deletes only this Compose project's local PostgreSQL demo volume and history, removes project containers/network, and leaves the stack stopped. Stop preserves the volume. Both keep application images and build cache.
+Reset deletes this Compose project's local demo volumes and financial history, removes project containers/network, and leaves the stack stopped. Stop preserves volumes. Both keep application images and build cache. If optional observability has been used, see [its separate cleanup instructions](OBSERVABILITY.md#shutdown-and-data) to remove monitoring data without deleting PostgreSQL.
 
 Startup checks Docker prerequisites, validates Compose, builds backend/frontend images, starts `postgres`, `backend` and `frontend`, waits up to **180 seconds** for healthchecks, and prints URLs or useful failure diagnostics. Build time is separate from the health timeout. It leaves the application running and does not run tests or install host tooling.
 
@@ -83,7 +83,7 @@ flowchart LR
 
 The backend is a modular monolith with application, domain, persistence and web responsibilities separated by feature. Persistence uses explicit Spring JDBC SQL, without JPA/Hibernate.
 
-There are exactly three runtime services: `postgres`, `backend`, `frontend`. Docker builder stages produce the executable JAR and Angular production bundle; backend and Nginx runtime containers run as non-root users.
+The default runtime has exactly three services: `postgres`, `backend`, `frontend`. Docker builder stages produce the executable JAR and Angular production bundle; backend and Nginx runtime containers run as non-root users. The optional observability profile described below adds monitoring services.
 
 | Build component | Pinned version |
 |---|---|
@@ -140,6 +140,7 @@ Import `backend/build.gradle.kts`, select JDK 21 and Node 20, configure a Docker
 | `03 - Frontend` | Starts Angular and opens Chrome with JavaScript debugging. |
 | `DEV - Full Stack` | Runs the local backend and frontend profiles together. |
 | `DEMO - Full Stack` | Builds and starts the three Compose services. |
+| `OBSERVABILITY - Full Stack` | Starts the complete optional ten-service environment. |
 | `TEST - Backend` | Runs the Gradle `test` task; supports Kotlin test debugging. |
 | `TEST - Frontend` | Runs Angular unit/component tests in ChromeHeadless. |
 
@@ -261,11 +262,23 @@ Tests also cover concurrent callbacks/grants/progress, transaction rollback and 
 | [Backend metrics](http://localhost:8080/actuator/metrics) | Micrometer JVM, HTTP and datasource metrics. |
 | [Frontend health](http://localhost:4200/health) | Nginx healthcheck. |
 
-PostgreSQL uses `pg_isready`. Actuator also exposes `/actuator/info`; sensitive health details and other management endpoints are not exposed.
+PostgreSQL uses `pg_isready`. Actuator also exposes `/actuator/info` and `/actuator/prometheus`; sensitive health details and unrelated management endpoints are not exposed.
 
 Nginx and the backend propagate `X-Request-ID`, generating a replacement when necessary, and return it in responses and structured logs. Request-scoped MDC is cleared in `finally`.
 
 Application logs go to stdout/stderr; Nginx provides access/error logs. Business successes are logged after commit, expected rejections are concise, and unexpected failures receive sanitized error logging. Credentials, HMAC secrets, signatures, authorization values and raw callback bodies are never logged.
+
+## Optional Observability
+
+The optional post-assignment stack on `develop` provides metrics (Prometheus/Grafana), logs (Filebeat/Elasticsearch/Kibana) and tracing (OpenTelemetry Collector/Jaeger):
+
+```bash
+./scripts/start-observability.sh
+```
+
+Open [Grafana](http://localhost:3000), [Kibana](http://localhost:5601) or [Jaeger](http://localhost:16686). Use `./scripts/start-observability.sh stop` to stop only monitoring and keep Casino Wallet running. This local stack requires more Docker memory than the simple demo.
+
+Normal `docker compose up --build` and `./scripts/start-demo.sh` still start only the three application services, without trace export. Monitoring is not required by the assignment or for financial correctness/readiness. See [OBSERVABILITY.md](OBSERVABILITY.md) for correlation, queries, shutdown, monitoring-only cleanup and security limitations.
 
 ## Security / Angular 17 Constraint
 

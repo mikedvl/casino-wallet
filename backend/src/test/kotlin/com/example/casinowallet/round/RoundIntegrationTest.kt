@@ -2,6 +2,7 @@ package com.example.casinowallet.round
 
 import com.example.casinowallet.config.DemoPlayer
 import com.example.casinowallet.support.PostgresLockProbe
+import io.micrometer.core.instrument.MeterRegistry
 import com.fasterxml.jackson.databind.JsonNode
 import org.assertj.core.api.Assertions.assertThat
 import org.flywaydb.core.Flyway
@@ -49,6 +50,7 @@ class RoundIntegrationTest @Autowired constructor(
     private val http: TestRestTemplate,
     private val flyway: Flyway,
     private val dataSource: DataSource,
+    private val metrics: MeterRegistry,
 ) {
     @BeforeEach
     fun resetIsolatedDatabase() {
@@ -101,7 +103,10 @@ class RoundIntegrationTest @Autowired constructor(
     @Test
     fun `insufficient funds cannot be covered by the proposed payout`() {
         fund("10.00")
+        val rejected = metrics.get("casino.wallet.rounds").tag("outcome", "rejected").counter()
+        val before = rejected.count()
         assertError(play("10.01", "100.00"), HttpStatus.CONFLICT, "INSUFFICIENT_FUNDS")
+        assertThat(rejected.count()).isEqualTo(before + 1)
         assertState("10.00", 0, 0)
     }
 
@@ -166,6 +171,10 @@ class RoundIntegrationTest @Autowired constructor(
     @CsvSource("8.00, 0.00, 2.00", "4.00, 10.00, 16.00")
     fun `failure at commit after settlement rolls back every financial write`(stake: String, win: String, balance: String) {
         fund("10.00")
+        val completed = metrics.get("casino.wallet.rounds").tag("outcome", "completed").counter()
+        val failed = metrics.get("casino.wallet.rounds").tag("outcome", "failed").counter()
+        val completedBefore = completed.count()
+        val failedBefore = failed.count()
         jdbc.execute(
             // language=PostgreSQL
             """
@@ -191,12 +200,15 @@ class RoundIntegrationTest @Autowired constructor(
             """.trimIndent(),
         )
         assertError(play(stake, win), HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR")
+        assertThat(completed.count()).isEqualTo(completedBefore)
+        assertThat(failed.count()).isEqualTo(failedBefore + 1)
         // Sequence advancement survives rollback, proving that all expected writes reached the commit hook.
         assertThat(jdbc.queryForObject<Boolean>("select is_called from round_failure_observed")).isTrue()
         assertState("10.00", 0, 0)
         jdbc.execute("drop trigger fail_round_commit on game_round")
         jdbc.execute("drop function fail_round_commit()")
         assertSuccess(play(stake, win), stake, win, balance)
+        assertThat(completed.count()).isEqualTo(completedBefore + 1)
         assertState(balance, 1, if (BigDecimal(win).signum() == 0) 1 else 2)
     }
 

@@ -50,5 +50,165 @@ services:
       timeout: 3s
       retries: 12
 
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=256MB
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    read_only: true
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 12
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    profiles: [observability]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_LOG_MODE: console
+      GF_PATHS_LOGS: /tmp/grafana
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/casino-wallet.json
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 12
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.4.6
+    profiles: [observability]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+    ports:
+      - "127.0.0.1:${ELASTICSEARCH_PORT:-9200}:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=3s"]
+      interval: 10s
+      timeout: 6s
+      start_period: 60s
+      retries: 18
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.4.6
+    profiles: [observability]
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_SECURITY_ENABLED: "false"
+      TELEMETRY_ENABLED: "false"
+      NODE_OPTIONS: --max-old-space-size=768
+    ports:
+      - "127.0.0.1:${KIBANA_PORT:-5601}:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://localhost:5601/api/status"]
+      interval: 10s
+      timeout: 6s
+      start_period: 90s
+      retries: 24
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:9.4.6
+    profiles: [observability]
+    user: root
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    environment:
+      CASINO_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME}
+    volumes:
+      - ./observability/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - filebeat_data:/usr/share/filebeat/data
+    read_only: true
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "filebeat", "test", "output", "-e", "--strict.perms=false"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 6
+
+  otel-collector:
+    build: ./observability/otel
+    profiles: [observability]
+    command: ["--config=/etc/otel/config.yml"]
+    volumes:
+      - ./observability/otel/otel-collector.yml:/etc/otel/config.yml:ro
+    read_only: true
+    healthcheck:
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:13133/"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
+
+  jaeger:
+    build: ./observability/jaeger
+    profiles: [observability]
+    command: ["--config=/etc/jaeger/config.yml"]
+    environment:
+      # Disable Jaeger's own query traces, not application trace ingestion.
+      OTEL_TRACES_SAMPLER: always_off
+    ports:
+      - "127.0.0.1:${JAEGER_PORT:-16686}:16686"
+    volumes:
+      - ./observability/jaeger/jaeger.yml:/etc/jaeger/config.yml:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:13133/status"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
+
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:
+  elasticsearch_data:
+  filebeat_data:

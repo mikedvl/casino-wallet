@@ -7,6 +7,7 @@ import com.example.casinowallet.ledger.persistence.JdbcLedgerRepository
 import com.example.casinowallet.wallet.application.WalletBalanceLimitException
 import com.example.casinowallet.wallet.domain.WalletSummary
 import com.example.casinowallet.wallet.persistence.JdbcWalletRepository
+import com.example.casinowallet.observability.CasinoWalletMetrics
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import org.springframework.transaction.support.TransactionSynchronization
@@ -21,6 +22,7 @@ class BonusLifecycle(
     private val wallets: JdbcWalletRepository,
     private val ledger: JdbcLedgerRepository,
     private val clock: Clock,
+    private val metrics: CasinoWalletMetrics,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -57,6 +59,7 @@ class BonusLifecycle(
         bonuses.finish(bonus.id, status)
         TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
             override fun afterCommit() {
+                metrics.bonusLifecycle(status)
                 log.info("event={} bonus_id={}", if (status == BonusStatus.COMPLETED) "bonus_completed" else "bonus_expired", bonus.id)
             }
         })

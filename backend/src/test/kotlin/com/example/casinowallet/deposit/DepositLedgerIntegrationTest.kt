@@ -4,6 +4,7 @@ import com.example.casinowallet.CasinoWalletApplication
 import com.example.casinowallet.deposit.application.DepositApplicationService
 import com.example.casinowallet.deposit.application.DepositCompletion
 import com.example.casinowallet.support.PostgresLockProbe
+import io.micrometer.core.instrument.MeterRegistry
 import com.fasterxml.jackson.databind.JsonNode
 import org.assertj.core.api.Assertions.assertThat
 import org.flywaydb.core.Flyway
@@ -53,6 +54,7 @@ class DepositLedgerIntegrationTest @Autowired constructor(
     private val http: TestRestTemplate,
     private val flyway: Flyway,
     private val dataSource: DataSource,
+    private val metrics: MeterRegistry,
 ) {
     @BeforeEach
     fun resetIsolatedDatabase() {
@@ -63,11 +65,19 @@ class DepositLedgerIntegrationTest @Autowired constructor(
 
     @Test
     fun `creation stays pending and signed callback credits exactly once`() {
+        val completed = metrics.get("casino.wallet.deposit.callbacks")
+            .tags("operation", "provider_callback", "outcome", "completed").counter()
+        val duplicate = metrics.get("casino.wallet.deposit.callbacks")
+            .tags("operation", "provider_callback", "outcome", "duplicate").counter()
+        val completedBefore = completed.count()
+        val duplicateBefore = duplicate.count()
         val id = createDeposit("25")
         assertState(id, "PENDING", "0.00", 0)
         assertThat(callback(id, "2500").statusCode).isEqualTo(HttpStatus.OK)
         assertState(id, "COMPLETED", "25.00", 2, "25.00")
         assertThat(callback(id, "2500").statusCode).isEqualTo(HttpStatus.OK)
+        assertThat(completed.count()).isEqualTo(completedBefore + 1)
+        assertThat(duplicate.count()).isEqualTo(duplicateBefore + 1)
         assertState(id, "COMPLETED", "25.00", 2, "25.00")
         assertError(callback(id, "2600"), HttpStatus.CONFLICT, "DEPOSIT_AMOUNT_MISMATCH")
         assertError(callback(id, "2500", "0".repeat(64)), HttpStatus.UNAUTHORIZED, "INVALID_SIGNATURE")
@@ -167,6 +177,12 @@ class DepositLedgerIntegrationTest @Autowired constructor(
     @Test
     fun `database failure after wallet and ledger writes rolls back the complete callback`() {
         val id = createDeposit()
+        val completed = metrics.get("casino.wallet.deposit.callbacks")
+            .tags("operation", "provider_callback", "outcome", "completed").counter()
+        val failed = metrics.get("casino.wallet.deposit.callbacks")
+            .tags("operation", "provider_callback", "outcome", "failed").counter()
+        val completedBefore = completed.count()
+        val failedBefore = failed.count()
         jdbc.execute(
             // language=PostgreSQL
             """
@@ -185,11 +201,14 @@ class DepositLedgerIntegrationTest @Autowired constructor(
             """.trimIndent(),
         )
         assertError(callback(id, "2500"), HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR")
+        assertThat(completed.count()).isEqualTo(completedBefore)
+        assertThat(failed.count()).isEqualTo(failedBefore + 1)
         assertState(id, "PENDING", "0.00", 0)
         jdbc.execute("drop trigger fail_completed_deposit on deposit")
         jdbc.execute("drop function fail_completed_deposit()")
         assertThat(callback(id, "2500").statusCode).isEqualTo(HttpStatus.OK)
         assertState(id, "COMPLETED", "25.00", 2, "25.00")
+        assertThat(completed.count()).isEqualTo(completedBefore + 1)
     }
 
     @ParameterizedTest
