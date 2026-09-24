@@ -1,1343 +1,295 @@
 # Casino Wallet
 
-A small casino wallet assignment built with Kotlin, Spring Boot, PostgreSQL and Angular 17.
+A casino wallet assignment with a Kotlin/Spring Boot backend, Angular 17 interface, PostgreSQL 16 and Docker Compose. The required wallet functionality is implemented; final delivery verification is in progress.
 
-The project is implemented in small, reviewable vertical slices with a green build required at the end of every stage.
+## Prerequisites
 
-> **Current status:** Stage 6 — Bonus Completion, Expiration and Complete Angular Page.
->
-> Deposits, mixed-funds rounds and welcome-bonus lifecycle use PostgreSQL transactions, wallet row locks and immutable ledger history. Wagering completion converts the remaining bonus to real funds; lazy expiration forfeits it. The Angular page supports deposits, demo completion, rounds, bonus progress, paginated transactions and EN/UK.
->
-> Stage 7 delivery/CI work has not begun. Existing DEV, DEMO and TEST workflows remain available.
+- **Reviewer / Docker demo:** Docker Engine or Docker Desktop, with a running daemon, and Docker Compose v2 supporting `up --wait` and `--wait-timeout`.
+- **Java, Node, npm and a Gradle installation are NOT required for the Docker reviewer workflow.** Builds run inside Docker.
+- **Local DEV / tests additionally require:** JDK 21, Node 20 (`>=20.9.0 <21`), npm and Chrome/Chromium. Helpers use Bash and standard macOS/Linux shell utilities.
 
-See:
+Tested locally with Docker Engine 28.0.4, Compose 2.34.0, Temurin 21.0.12.1 and Node 20.20.2. The recommended Node version is recorded in `frontend/.nvmrc`.
 
-- [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) — staged implementation roadmap
-- [NOTES.md](NOTES.md) — assumptions and architectural decisions
+## Quick Start
 
----
+From the repository root:
 
-# Architecture
+```bash
+./scripts/start-demo.sh
+```
+
+**Open: [http://localhost:4200](http://localhost:4200).**
+
+- **Stop and preserve financial/demo history:** `./scripts/start-demo.sh stop`
+- **Intentionally reset local demo data:** `./scripts/start-demo.sh reset`
+
+Reset deletes only this Compose project's local PostgreSQL demo volume and history, removes project containers/network, and leaves the stack stopped. Stop preserves the volume. Both keep application images and build cache.
+
+Startup checks Docker prerequisites, validates Compose, builds backend/frontend images, starts `postgres`, `backend` and `frontend`, waits up to **180 seconds** for healthchecks, and prints URLs or useful failure diagnostics. Build time is separate from the health timeout. It leaves the application running and does not run tests or install host tooling.
+
+No argument means `start`; `./scripts/start-demo.sh start` is equivalent. Use `--help` for the command summary. The script also works by full path from another directory; repeated starts reconcile the existing stack without resetting data.
+
+### Configuration and native commands
+
+No `.env` is required or created automatically. Compose uses disposable local defaults. To customize them, use the existing shell variables or an ignored `.env` based on [.env.example](.env.example).
+
+| Setting | Default host address |
+|---|---|
+| `FRONTEND_PORT` | `localhost:4200` |
+| `BACKEND_PORT` | `localhost:8080` |
+| `POSTGRES_PORT` | `localhost:15432` |
+
+The backend container always connects to `postgres:5432`; changing the PostgreSQL host port does not change its internal port.
+
+Docker Compose remains available directly:
+
+| Action | Native command |
+|---|---|
+| Build and start, attached to logs | `docker compose up --build` |
+| Stop, preserve PostgreSQL data | `docker compose down` |
+| Intentionally delete local demo data | `docker compose down -v` |
+
+The helper uses detached startup with `--wait --wait-timeout 180` and adds `--remove-orphans` to stop/reset. It never removes application images or prunes unrelated Docker resources.
+
+On a new database, Flyway applies V1–V6 and seeds one wallet with `0.00 / 0.00`, no bonus and empty deposit/round/ledger history. Existing volumes retain their state; migrations are schema history, not API versions.
+
+If startup fails, inspect `docker compose ps --all` and `docker compose logs -f`. The helper already prints bounded recent logs and keeps failed containers available. Check for occupied host ports, including local DEV processes, before changing explicit port overrides.
+
+## What the Application Demonstrates
+
+- Real and bonus balances.
+- An append-only financial ledger.
+- HMAC-protected deposit callbacks.
+- Durable callback idempotency.
+- A one-time welcome bonus.
+- Wagering progress.
+- Real-first mixed-funds betting.
+- Proportional payout allocation.
+- Bonus completion and expiration.
+- Concurrent wallet protection.
+- An Angular English/Ukrainian interface.
+- Paginated transaction history.
+
+For a short UI walkthrough on a fresh database: create a `20.00` deposit, confirm that it is pending, use **Complete demo deposit**, then try a round with stake `5.00` and payout `0.00`. Inspect balances, bonus progress and history, and switch EN/UK. These actions persist demo financial history. Demo completion does not collect a real payment.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    Browser --> Frontend[Angular 17 / Nginx]
+    Browser --> Frontend[Angular / Nginx]
     Frontend -->|/api| Backend[Kotlin / Spring Boot]
-    Backend --> PostgreSQL[(PostgreSQL 16)]
+    Backend -->|Spring JDBC| PostgreSQL[(PostgreSQL 16)]
 ```
 
-The production/demo runtime consists of three separate services:
+The backend is a modular monolith with application, domain, persistence and web responsibilities separated by feature. Persistence uses explicit Spring JDBC SQL, without JPA/Hibernate.
 
-```text
-Browser
-   |
-   v
-frontend
-Angular 17 + Nginx
-   |
-   | /api
-   v
-backend
-Kotlin + Spring Boot
-   |
-   | JDBC
-   v
-postgres
-PostgreSQL 16
-```
+There are exactly three runtime services: `postgres`, `backend`, `frontend`. Docker builder stages produce the executable JAR and Angular production bundle; backend and Nginx runtime containers run as non-root users.
 
-Responsibilities:
-
-```text
-Frontend
-  - serves Angular SPA
-  - proxies /api
-  - exposes /health
-  - propagates X-Request-ID
-  - writes access/error logs
-
-Backend
-  - REST API
-  - business rules
-  - transaction boundaries
-  - observability
-  - wallet locking and financial consistency
-
-PostgreSQL
-  - durable application state
-  - source of truth for wallet balances
-  - ACID transactions
-  - database constraints
-  - row locking
-```
-
----
-
-# Wallet Read API
-
-`GET /api/wallet` reads the single demo player's wallet. It requires no authentication, query parameters or player ID in the URL.
-
-```json
-{
-  "realBalance": "0.00",
-  "bonusBalance": "0.00",
-  "bonus": null
-}
-```
-
-Both values are decimal strings with exactly two fractional digits. Angular preserves those strings and displays `Real balance` and `Bonus balance` in EUR, with loading and retry states when the backend is not yet available.
-
-Flyway runs on backend startup in both DEV and DEMO. `V1__create_wallet.sql` creates `wallet` with `player_id UUID PRIMARY KEY` and two `NUMERIC(19,2) NOT NULL DEFAULT 0.00` balances, each protected by a nonnegative `CHECK`. `V2__seed_demo_wallet.sql` inserts one demo wallet for `00000000-0000-0000-0000-000000000001` with `0.00 / 0.00`. Applied migrations are recorded in `flyway_schema_history`; restarting does not reseed or reset balances.
-
-The path is controller → application service → Spring JDBC → PostgreSQL. The summary runs a `READ_COMMITTED` transaction under the wallet row lock and resolves bonus lifecycle before returning. It can therefore commit a conversion or forfeiture. `bonus` is `null` before a grant; afterwards it retains `status` (`ACTIVE`, `COMPLETED`, `EXPIRED`), `initialAmount`, `wageringProgress`, `wageringTarget` (two-decimal strings) and `expiresAt` (UTC ISO timestamp). Historical metadata remains visible after resolution. The page refreshes wallet first, then ledger, after a financial action.
-
----
-
-# Deposits and Ledger API
-
-The demo uses the same seeded player for deposit creation, wallet reads and ledger reads. There is no authentication or caller-selected player ID at this stage.
-
-`V3__create_deposits_and_ledger.sql` adds `deposit` and `ledger_entry`; V1/V2 remain unchanged. Both tables reference the wallet and use `NUMERIC(19,2)` money with database constraints. A unique `(player_id, reference_type, reference_id, operation_type, wallet_type)` key prevents duplicate ledger operations. A PostgreSQL statement trigger rejects ledger `UPDATE`, `DELETE` and `TRUNCATE`, including direct SQL. Administrative schema changes remain the database owner's responsibility.
-
-## Create a pending deposit
-
-```bash
-curl --fail-with-body -i http://localhost:4200/api/deposits \
-  -H 'Content-Type: application/json' \
-  -H 'X-Request-ID: deposit-create-example' \
-  --data-binary '{"amount":"25.00"}'
-```
-
-HTTP `201`:
-
-```json
-{"depositId":"<server-generated UUID>","amount":"25.00","status":"PENDING"}
-```
-
-`amount` must be a positive plain decimal **string**, with at most two fractional digits, no exponent and a maximum of `99999999999999999.99`. `"25"` normalizes to `"25.00"`; extra fractional digits are rejected without rounding. Creating a pending deposit neither credits the wallet nor writes ledger history. It takes no wallet `FOR UPDATE` lock; PostgreSQL still performs normal foreign-key checks.
-
-## Complete a deposit through the provider callback
-
-`POST /api/provider/deposits/callback` accepts:
-
-```json
-{"depositId":"<existing UUID>","amountCents":2500}
-```
-
-`X-Signature` is the 64-character hexadecimal HMAC-SHA256 of the **exact request body bytes**, using `PAYMENT_PROVIDER_HMAC_SECRET` as a UTF-8 key. Hex letter case is ignored. Signature verification precedes JSON parsing and database access; decoded digests are compared with `MessageDigest.isEqual`. Reformatting JSON requires a new signature.
-
-`amountCents` must be a positive JSON integer. Strings, fractional JSON numbers and values above `9999999999999999999` are rejected. Conversion uses `BigInteger` and `BigDecimal(cents, 2)`, preserving the full database range without floating point or `Long` overflow.
-
-Compose and local Spring Boot share the harmless `local-demo-hmac-secret-change-me` default shown in `.env.example`. Override `PAYMENT_PROVIDER_HMAC_SECRET` in the backend environment for a different provider key. Compose reads `.env`; a local IDE/JVM run must receive the variable in its process environment. Never use the demo default for a real provider, commit a real secret, or log signatures/raw callback bodies.
-
-After copying the returned deposit UUID into `DEPOSIT_ID`, this example signs and sends the same byte array. Set the signing process's secret to match the backend if overriding the demo default:
-
-```bash
-export DEPOSIT_ID='<UUID returned by POST /api/deposits>'
-python3 - <<'PY'
-import hashlib
-import hmac
-import json
-import os
-import urllib.request
-
-body = json.dumps({"depositId": os.environ["DEPOSIT_ID"], "amountCents": 2500}, separators=(",", ":")).encode("utf-8")
-secret = os.environ.get("PAYMENT_PROVIDER_HMAC_SECRET", "local-demo-hmac-secret-change-me").encode("utf-8")
-signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
-request = urllib.request.Request("http://localhost:4200/api/provider/deposits/callback", data=body, headers={
-    "Content-Type": "application/json",
-    "X-Signature": signature,
-    "X-Request-ID": "deposit-callback-example",
-})
-with urllib.request.urlopen(request) as response:
-    print(response.status, response.read().decode("utf-8"))
-PY
-```
-
-HTTP `200` returns `{"depositId":"<UUID>","status":"COMPLETED"}`. Repeating the correctly signed callback with the matching amount returns the same success without another credit or ledger row, including after a backend restart.
-
-Completion runs in one application-service `READ_COMMITTED` transaction. An unlocked lookup discovers the owner, then rows are locked **wallet → deposit** with `SELECT ... FOR UPDATE`. The locked amount and status are checked again. The real credit and ledger entry, any welcome bonus metadata/credit/ledger entry, and the deposit completion timestamp commit or roll back together. Credited balances come from `UPDATE ... RETURNING`; success is logged and returned only after commit. Idempotency uses PostgreSQL state and uniqueness, with no cache or in-memory keys.
-
-## Welcome bonus
-
-The first qualifying **completed** deposit of at least EUR `20.00` grants `min(deposit, 100.00)` once per player. Earlier deposits of `10.00` or `19.99` do not consume eligibility. A clean `20.00` completion leaves `20.00` real and `20.00` bonus; a `100.01` completion grants `100.00` bonus. Creating a pending deposit grants nothing.
-
-While holding the wallet lock, the callback checks for an existing bonus and for any earlier completed deposit of at least `20.00`; the current deposit is still pending. This also prevents retroactive grants for qualifying deposits completed before V5. Concurrent qualifying callbacks both credit real money, but only whichever transaction completes first can grant the bonus. Unique player and source-deposit constraints reinforce the one-time grant.
-
-The `bonus` table stores the source deposit, initial amount, wagering target (`initial_amount × 20`), progress (initially `0.00`), `ACTIVE` status and timestamps. An injected UTC `Clock` sets `granted_at`; `expires_at` is exactly 168 hours later. Current bonus money lives only in `wallet.bonus_balance`. Each grant appends one positive `WELCOME_BONUS_GRANTED / BONUS / DEPOSIT` entry referencing the source deposit and the authoritative bonus balance after credit.
-
-`V6__bonus_completion_and_expiration.sql` adds terminal statuses and a database trigger preventing transitions out of `COMPLETED` or `EXPIRED`. V1–V5 remain immutable. No current bonus balance is duplicated in metadata.
-
-Lifecycle is resolved while holding the wallet lock:
-
-- When `wageringProgress >= wageringTarget`, completion takes priority, including for historical Stage 5 progress already above target. The current bonus balance is converted to real money, with two `BONUS_CONVERTED / BONUS` reference entries: negative on the bonus wallet and positive on the real wallet.
-- Otherwise `now >= expiresAt` expires an active bonus. Its remaining balance is forfeited with one negative `BONUS_FORFEITED / BONUS` reference entry; real money is unchanged.
-- A zero remaining balance changes status without a zero-value ledger entry. Repeated resolution is idempotent.
-- Resolution runs before wallet summary, a valid matching pending callback (including demo completion), and round execution. Pending creation, invalid signatures, amount mismatches and completed duplicate callbacks do not trigger it. There is no scheduler.
-- A completing round first settles its win and advances full-stake progress, then converts the remaining bonus in the same transaction. Already completed wagering wins over expiration; an otherwise expired bonus cannot fund a new round.
-
-Expected business rejection after resolution returns an application outcome before any new round/deposit writes, so resolved expiration can commit even when the API returns `409`. A technical failure rolls back lifecycle and the financial operation together. Conversion is guarded against real-balance overflow and fails safely with `WALLET_BALANCE_LIMIT`; no money is truncated or lost.
-
-## Demo deposit completion
-
-`POST /api/demo/deposits/{depositId}/complete` accepts no monetary input and completes the stored pending amount using the same application transaction, lock order, eligibility checks and idempotency as a provider callback. It returns `{"depositId":"<UUID>","status":"COMPLETED"}`. The Angular button uses this endpoint; no HMAC key or signature is sent to the browser. The signed provider endpoint is unchanged.
-
-This endpoint is enabled for the assignment demo only. Disable it with the backend property `demo.enabled=false` (for example Spring Boot application argument `--demo.enabled=false` or process environment `DEMO_ENABLED=false`), or remove it before a real deployment. For Compose, pass that optional property to the backend container via an override; it is not a required environment variable. The demo action does not collect a real payment.
-
-Errors use a safe Problem Detail response with a stable `code` and propagated `X-Request-ID`:
-
-| Status | Code | Condition |
-|---|---|---|
-| 400 | `INVALID_DEPOSIT_AMOUNT` | Invalid creation amount |
-| 400 | `INVALID_CALLBACK` | Signed but invalid callback JSON, UUID or cents |
-| 400 | `INVALID_PAGINATION` | Negative page or size outside 1–100 |
-| 400 | `INVALID_REQUEST` | Malformed request or unparseable query parameter |
-| 401 | `INVALID_SIGNATURE` | Missing, malformed or incorrect signature, even for completed/unknown deposits |
-| 404 | `DEPOSIT_NOT_FOUND` | A correctly signed callback references an unknown deposit |
-| 409 | `DEPOSIT_AMOUNT_MISMATCH` | Callback amount differs, including after completion |
-| 409 | `WALLET_BALANCE_LIMIT` | The credit would exceed `NUMERIC(19,2)` |
-| 500 | `INTERNAL_ERROR` | An unexpected failure; no SQL or internal exception details are returned |
-
-## Read ledger history
-
-```bash
-curl --fail-with-body 'http://localhost:4200/api/ledger?page=0&size=20'
-```
-
-The response contains `items`, `page`, `size`, `totalElements` and `totalPages`. Each item contains `id`, `walletType` (`REAL` or `BONUS`), `operationType` (`DEPOSIT_COMPLETED`, `WELCOME_BONUS_GRANTED`, `ROUND_STAKE`, `ROUND_WIN`, `BONUS_CONVERTED`, `BONUS_FORFEITED`), `amount`, `balanceAfter`, `referenceType` (`DEPOSIT`, `GAME_ROUND`, `BONUS`), `referenceId` and UTC `createdAt`. Both money fields are two-decimal strings. Negative signs are preserved. Bonus lifecycle references identify the bonus UUID. V6 extends operation/sign/reference constraints while preserving uniqueness and append-only protection.
-
-Pages start at zero; the default size is 20 and the maximum is 100. Empty/out-of-range pages return an empty `items` array with the actual totals. SQL sorts by `created_at DESC, id DESC`, backed by a matching player/history index. Items and totals use one read-only PostgreSQL snapshot per request; separate page requests can naturally observe newly committed deposits or rounds.
-
----
-
-# Atomic Rounds API
-
-`POST /api/rounds/play` plays and settles one synchronous round for the same seeded demo player. Both input amounts must be plain decimal **strings** with at most two fractional digits and a maximum of `99999999999999999.99`. Stake must be positive; total payout may be zero. `"8"` normalizes to `"8.00"`; values such as `"8.001"`, negative amounts, exponents and JSON numbers are rejected without rounding.
-
-With a real balance of `10.00` and no active bonus, funded through the deposit/callback API:
-
-```bash
-curl --fail-with-body -i http://localhost:4200/api/rounds/play \
-  -H 'Content-Type: application/json' \
-  -H 'X-Request-ID: round-example' \
-  --data-binary '{"stake":"4.00","totalWin":"10.00"}'
-```
-
-HTTP `200`:
-
-```json
-{"roundId":"<server-generated UUID>","stake":"4.00","totalWin":"10.00","realBalance":"16.00","bonusBalance":"0.00"}
-```
-
-`totalWin` is deterministic demo input representing **total payout**, not net profit: `10.00 - 4.00 + 10.00 = 16.00`. There is no randomness or external game provider. Production payout authority would belong to a trusted provider, outside this assignment. Each accepted play request creates a new round; no round idempotency key is defined.
-
-The application service owns one `READ_COMMITTED` transaction:
-
-1. Lock the wallet and read its balances with `SELECT ... FOR UPDATE`.
-2. Resolve existing bonus lifecycle, then inspect the active bonus. If active, require stake ≤ `5.00` even when real money covers the entire stake; check combined funds. Without an active bonus, check real funds only and apply no bonus stake limit. Validate projected balances, including a possible conversion, before any round writes.
-3. Allocate real stake first and bonus stake for the remainder. Debit both balances in one `UPDATE ... RETURNING real_balance, bonus_balance`; append a negative `ROUND_STAKE` entry for each non-zero portion.
-4. Insert `game_round` with the stake, total payout and all four actual allocation amounts.
-5. For a positive payout, credit both win portions in one guarded `UPDATE ... RETURNING` and append a positive `ROUND_WIN` for each non-zero portion.
-6. If a bonus is active, increment wagering progress by the **full stake**, including fully real-funded stakes, and complete/convert it if the target is reached.
-7. Commit before logging or returning success.
-
-A zero payout produces no credit and no `ROUND_WIN` row; zero stake/win portions also produce no ledger entries. For the example above the two round ledger entries are `-4.00 / balanceAfter 6.00` and `+10.00 / balanceAfter 16.00`. Wallet, round, wagering progress and ledger entries commit or roll back together, including on commit-time failure. All bonus mutations first hold the wallet lock, which serializes metadata access and progress updates. Deposit callbacks retain their existing **wallet → deposit** lock order. The ledger remains audit history; current balances are always read from the wallet.
-
-For mixed stakes, `realWin = round(totalWin × realStake / stake, 2, HALF_UP)` and `bonusWin = totalWin - realWin`. Only the real portion is rounded; the bonus gets the exact remainder. A `4.00` stake allocated as `1.00` real + `3.00` bonus with a `10.00` payout returns `2.50` real + `7.50` bonus. A `1.00 / 3.00` real fraction of `10.00` returns `3.33` real + `6.67` bonus, without losing a cent. The request and response formats above are unchanged; allocation is server-owned, and client-supplied `realStake`, `bonusStake`, `realWin` or `bonusWin` fields are rejected.
-
-| Status | Code | Result |
-|---|---|---|
-| 400 | `INVALID_ROUND_AMOUNT` | Invalid stake or totalWin; no financial writes |
-| 400 | `INVALID_REQUEST` | Malformed JSON/request; no financial writes |
-| 409 | `INSUFFICIENT_FUNDS` | Funds after lifecycle resolution cannot cover stake; no round or progress writes; prior resolution commits |
-| 409 | `MAX_BET_EXCEEDED` | Stake exceeds `5.00` while a bonus remains active; no round or progress writes |
-| 409 | `WALLET_BALANCE_LIMIT` | Payout/conversion would overflow `NUMERIC(19,2)`; no round writes; already resolved lifecycle can commit |
-| 500 | `INTERNAL_ERROR` | Technical failure; the complete round rolls back and internal details remain private |
-
-V1–V4 remain immutable schema history. `V5__welcome_bonus_and_mixed_rounds.sql` adds bonus metadata and extends `game_round` with required `NUMERIC(19,2)` fields `real_stake`, `bonus_stake`, `real_win` and `bonus_win`. Existing Stage 4 rows are backfilled as real-only (`real_stake = stake`, `real_win = total_win`, both bonus portions zero) before enforcing non-null and allocation-sum constraints. Historical ledger rows are unchanged. The original UUIDs, wallet foreign key, stake, payout and creation timestamp remain; no round status machinery is added.
-
-V5 extends ledger constraints to `REAL` and `BONUS`: positive deposit credits require `REAL / DEPOSIT`, positive welcome grants require `BONUS / DEPOSIT`, and signed round entries require `GAME_ROUND`. Stakes must be negative and wins positive. Zero amounts remain forbidden. The unique business-operation key includes wallet type, allowing each round's real and bonus portions exactly once per operation. Balance constraints and the append-only trigger remain intact; ledger `UPDATE`, `DELETE` and `TRUNCATE` remain rejected.
-
-PostgreSQL integration tests fund the wallet through signed deposits and prove that two concurrent `8.00` losing bets against `10.00` produce exactly one success and one `INSUFFICIENT_FUNDS` response, leaving `2.00`, one round and one stake entry. A controlled transaction holds the wallet row lock; bounded polling follows `pg_blocking_pids` from its known backend PID to prove that both requests actually wait in PostgreSQL. No SQL-text matching or timing-only concurrency proof is used. Tests also verify rollback and `sum(REAL ledger amounts) = wallet.real_balance`.
-
-Tests also prove concurrent qualifying deposits grant once, concurrent active-bonus stakes do not lose wagering progress, and both `sum(REAL ledger amounts)` and `sum(BONUS ledger amounts)` reconcile independently with the wallet. Stage 6 covers exact expiration boundaries using a controlled `Clock`, completion after the final mixed win, zero remaining balances, repeated/concurrent lifecycle resolution and commit-time failures. Contention uses a known PostgreSQL PID and `pg_blocking_pids`; deferred test-only database triggers prove rollback after mutations have occurred.
-
-## Angular page
-
-Open `http://localhost:4200`. The page includes authoritative balances, bonus history/progress, Reactive Forms for deposits and deterministic rounds, demo deposit completion and a newest-first ledger with ten rows per page. Switch between English and Ukrainian using EN/UK. Labels, enum values, validation, loading, success and error states are translated; money stays as backend decimal strings. Dates display explicitly in UTC.
-
-The page validates decimal syntax/range, but the backend decides available funds, allocation, bonus limits and lifecycle. Actions are disabled while requests are active. A small Signals facade coordinates requests, refreshes wallet before ledger, and rejects stale responses using a generation token. A pending deposit does not trigger a wallet refresh. A rejected financial action does refresh, because expiration may have committed. Errors use an allowlist of stable `ProblemDetail.code` translations, with a generic fallback; server detail text is never displayed. No frontend signing secret, money arithmetic or client-side lifecycle decisions are present.
-
----
-
-# Run Modes
-
-The project intentionally supports **two different execution modes**.
-
-They solve different problems and should not be confused.
-
-| Mode | PostgreSQL | Backend | Frontend | Primary purpose |
-|---|---|---|---|---|
-| **DEV** | Docker | Local / IntelliJ | Local Angular dev server | Fast development, debugging, hot reload |
-| **DEMO** | Docker | Docker | Docker + Nginx | Reproducible reviewer / clean-clone execution |
-
-## DEV mode
-
-Preferred during active development:
-
-```text
-Browser
-   |
-   v
-Angular Dev Server
-localhost:4200
-   |
-   | /api proxy
-   v
-Spring Boot
-localhost:8080
-   |
-   | JDBC
-   v
-PostgreSQL
-Docker
-```
-
-Advantages:
-
-- Kotlin breakpoints in IntelliJ IDEA
-- TypeScript/JavaScript debugging
-- Angular live reload
-- Spring Boot DevTools restart
-- faster feedback loop
-- no Docker image rebuild after every source change
-
-## DEMO mode
-
-Used for reviewer verification:
-
-```text
-Browser
-   |
-   v
-Frontend container
-Angular build + Nginx
-   |
-   v
-Backend container
-Spring Boot
-   |
-   v
-PostgreSQL container
-```
-
-The complete application starts with:
-
-```bash
-docker compose up --build
-```
-
-This mode proves that the repository can be cloned and run reproducibly without relying on the developer's IDE configuration.
-
----
-
-# Repository Structure
-
-```text
-casino-wallet/
-├── backend/                 Spring Boot application and backend Docker image
-├── frontend/                Angular application and Nginx Docker image
-├── scripts/
-│   └── verify.sh            Local verification pipeline
-├── compose.yaml             PostgreSQL, backend and frontend services
-├── README.md
-├── NOTES.md
-├── IMPLEMENTATION_PLAN.md
-├── AGENTS.md
-├── .env.example
-└── .gitignore
-```
-
-The local `docs/` directory contains private development notes and is intentionally excluded from Git.
-
----
-
-# Technology Stack
-
-| Component | Version |
+| Build component | Pinned version |
 |---|---|
-| Java container images | `eclipse-temurin:21.0.12_8-jdk-noble` / `21.0.12_8-jre-noble` |
-| Gradle Wrapper | `8.14.3` |
-| Kotlin | `2.2.21` |
-| Spring Boot | `3.5.16` |
-| Flyway core / PostgreSQL module | `11.7.2` (Spring Boot dependency management) |
-| Testcontainers | `1.21.4` |
-| PostgreSQL | `postgres:16.15-alpine3.23` |
-| Node builder | `node:20.20.2-alpine3.22` |
-| Angular | `17.3.12` |
-| Angular CLI | `17.3.17` |
-| TypeScript | `5.4.5` |
-| Nginx | `nginxinc/nginx-unprivileged:1.28.2-alpine` |
+| Kotlin / Spring Boot | 2.2.21 / 3.5.16 |
+| Gradle Wrapper | 8.14.3 |
+| Angular / Angular CLI | 17.3.12 / 17.3.17 |
+| TypeScript | 5.4.5 |
+| PostgreSQL / Nginx | 16.15 / 1.28.2 |
 
-Top-level npm dependencies use exact versions and transitive dependencies are pinned by `package-lock.json`.
+Exact image tags and dependency versions are recorded in the Dockerfiles, `compose.yaml`, Gradle configuration and `frontend/package-lock.json`.
 
-Gradle dependency versions are reproducible through the committed Gradle Wrapper and Spring Boot dependency management.
+## Development and Testing
 
----
+### DEV versus DEMO
 
-# Prerequisites
+| Mode | PostgreSQL | Backend / frontend | Purpose |
+|---|---|---|---|
+| DEV | Docker | Local JVM / Angular dev server | Debugging and fast reload |
+| DEMO | Docker | Both in Docker | Reviewer workflow and production builds |
 
-## DEMO mode
+Stop local DEV processes before starting DEMO: both use host ports `8080` and `4200`. The lifecycle helper manages Compose containers, not local JVM/npm processes.
 
-Required:
-
-- Docker Engine or Docker Desktop
-- Docker Compose v2
-- `curl` for optional manual smoke checks
-
-Tested with:
-
-```text
-Docker Engine: 28.0.4
-Docker Compose: 2.34.0
-```
-
-No local Java or Node installation is required to run the complete containerized stack.
-
-## DEV mode
-
-Additionally required:
-
-- JDK 21
-- Node.js `>=20.9.0 <21`
-- npm
-- Bash
-- Chrome or Chromium
-- running Docker daemon for PostgreSQL and Testcontainers
-
-Recommended Node version:
-
-```text
-20.20.2
-```
-
-The repository contains:
-
-```text
-frontend/.nvmrc
-```
-
-For `nvm` users:
-
-```bash
-cd frontend
-nvm use
-```
-
-Verify the local environment:
-
-```bash
-java -version
-node --version
-npm --version
-docker compose version
-```
-
-Expected major versions:
-
-```text
-Java: 21
-Node: 20
-Docker Compose: 2
-```
-
-Set `JAVA_HOME` to JDK 21.
-
-If Chrome is not detected automatically by frontend tests, configure `CHROME_BIN`.
-
----
-
-# DEMO Mode — Full Containerized Run
-
-This is the recommended way for a reviewer to run the project.
-
-## 1. Create local environment configuration
-
-From the repository root:
-
-```bash
-cp .env.example .env
-```
-
-The values in `.env.example` are disposable local defaults, not production credentials.
-
-The real `.env` file is ignored by Git.
-
-## 2. Start the complete stack
-
-```bash
-docker compose up --build
-```
-
-Docker Compose starts:
-
-```text
-postgres
-   ↓ healthy
-
-backend
-   ↓ ready
-
-frontend
-   ↓ healthy
-```
-
-PostgreSQL defaults to `localhost:15432`, including when no `.env` exists. To use another host port, set `POSTGRES_PORT` in `.env` or export it in the shell, for example:
-
-```text
-POSTGRES_PORT=25432
-```
-
-The internal container connection remains:
-
-```text
-postgres:5432
-```
-
-Only the host mapping changes.
-
-## Service URLs
-
-| Service | Default address |
-|---|---|
-| Frontend | http://localhost:4200 |
-| Frontend health | http://localhost:4200/health |
-| Backend health | http://localhost:8080/actuator/health |
-| Backend liveness | http://localhost:8080/actuator/health/liveness |
-| Backend readiness | http://localhost:8080/actuator/health/readiness |
-| Backend info | http://localhost:8080/actuator/info |
-| Backend metrics | http://localhost:8080/actuator/metrics |
-| PostgreSQL | localhost:15432 |
-
-Inspect the stack:
-
-```bash
-docker compose ps
-```
-
-Inspect logs:
-
-```bash
-docker compose logs -f
-```
-
-Stop the stack:
-
-```bash
-docker compose down
-```
-
-The PostgreSQL named volume is preserved.
-
-Use:
-
-```bash
-docker compose down -v
-```
-
-only when the local database should intentionally be deleted.
-
-Backend and frontend containers run as non-root users.
-
-Runtime images contain runtime artifacts only, not project source trees or build caches.
-
----
-
-# DEV Mode — Fast Local Development
-
-DEV mode is the preferred workflow while changing application code.
-
-The architecture is:
-
-```text
-PostgreSQL -> Docker
-Backend    -> local JVM / IntelliJ IDEA
-Frontend   -> local Angular dev server
-Browser    -> Chrome
-```
-
----
-
-## 1. Start PostgreSQL
-
-From the repository root:
+For CLI development, run these from the repository root in separate terminals:
 
 ```bash
 docker compose up -d postgres
 ```
 
-If local port `15432` is occupied, choose another host port:
-
-```bash
-POSTGRES_PORT=25432 docker compose up -d postgres
-```
-
-Check health:
-
-```bash
-docker compose ps postgres
-```
-
-Expected:
-
-```text
-healthy
-```
-
----
-
-## 2. Start backend locally
-
-From:
-
 ```bash
 cd backend
-```
-
-With the default Compose host port:
-
-```bash
 DB_PORT=15432 ./gradlew bootRun
 ```
 
-If you override `POSTGRES_PORT`, pass the same value as `DB_PORT` to the local backend.
-
-Backend URL:
-
-```text
-http://localhost:8080
-```
-
-Health checks:
-
-```bash
-curl http://localhost:8080/actuator/health/liveness
-curl http://localhost:8080/actuator/health/readiness
-```
-
-Expected:
-
-```json
-{"status":"UP"}
-```
-
-Spring Boot DevTools supports application restart after compiled classes change.
-
----
-
-## 3. Start frontend locally
-
-In another terminal:
-
 ```bash
 cd frontend
-nvm use
+npm ci
 npm start
 ```
 
-or without `nvm`:
+Select Node 20 first (`nvm use` in `frontend/` if using nvm) and set `JAVA_HOME` to JDK 21. `npm ci` is needed initially and after dependency changes, not before every dev-server restart.
 
-```bash
-cd frontend
-npm start
-```
+If `POSTGRES_PORT` changes, pass the same value as `DB_PORT` to the local backend. A local Spring Boot process does not automatically read the root `.env`; supply any `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` or `SERVER_PORT` overrides in its environment.
 
-Frontend URL:
+Angular reloads on source changes. Spring Boot DevTools restarts after compiled classes/resources change; use IntelliJ **Build Project** after backend edits. Frontend API URLs stay relative: the Angular dev proxy targets `localhost:8080`, while Nginx targets `backend:8080`.
 
-```text
-http://localhost:4200
-```
+### Shared IntelliJ profiles
 
-Angular development server provides live reload.
+Import `backend/build.gradle.kts`, select JDK 21 and Node 20, configure a Docker connection named `Docker` and the Chrome executable. Tool paths remain machine-local. Profiles are shared in [.run/](.run/).
 
----
+| Profile | Behaviour |
+|---|---|
+| `01 - PostgreSQL` | Starts only PostgreSQL, publishing host port `15432`. |
+| `02 - Backend` | Starts PostgreSQL first, then the local Spring Boot JVM. |
+| `03 - Frontend` | Starts Angular and opens Chrome with JavaScript debugging. |
+| `DEV - Full Stack` | Runs the local backend and frontend profiles together. |
+| `DEMO - Full Stack` | Builds and starts the three Compose services. |
+| `TEST - Backend` | Runs the Gradle `test` task; supports Kotlin test debugging. |
+| `TEST - Frontend` | Runs Angular unit/component tests in ChromeHeadless. |
 
-# Local API Proxy
+For individual TypeScript test debugging, use IntelliJ's Karma integration. Stopping local DEV sessions leaves detached PostgreSQL running; stop it separately with `docker compose stop postgres` when needed.
 
-Browser code always uses relative API URLs:
-
-```text
-/api/*
-```
-
-In DEV mode:
-
-```text
-Browser
-   ↓
-Angular Dev Server :4200
-   ↓
-proxy.conf.json
-   ↓
-Spring Boot :8080
-```
-
-The proxy target is:
-
-```text
-http://localhost:8080
-```
-
-This avoids development-only CORS configuration.
-
-In DEMO mode:
-
-```text
-Browser
-   ↓
-Nginx
-   ↓
-/api
-   ↓
-backend:8080
-```
-
-`GET /api/wallet` returns HTTP `200` with the wallet JSON through either proxy. Unimplemented routes still return `404`.
-
----
-
-# IntelliJ IDEA Development Workflow
-
-Seven shared profiles are stored in `.run/` and appear in **Run / Debug Configurations** when the repository root is opened in IntelliJ IDEA.
-
-## One-time IDE setup
-
-- Link `backend/build.gradle.kts` as a Gradle project and let the import finish. The backend profile uses the imported `com.example.casino-wallet.main` module.
-- Select JDK 21 as the Project SDK and Gradle JVM.
-- Select Node 20 as the project Node runtime and its npm as the project package manager. `frontend/.nvmrc` remains the CLI version reference. Run `npm ci` in `frontend/` once before starting the dev server or frontend tests.
-- Configure a local Docker connection named `Docker` in **Settings → Build, Execution, Deployment → Docker**, and start the Docker daemon.
-- Configure the installed Chrome executable in **Settings → Tools → Web Browsers and Preview**. IntelliJ must have its Spring Boot, Docker, npm and JavaScript debugging support available.
-
-JDK, Node, Docker socket and browser executable locations are machine-local IDE settings. Shared profiles contain project-relative paths and no credentials.
-
-| Profile | Native type | Behaviour |
-| --- | --- | --- |
-| `01 - PostgreSQL` | Docker Compose | Starts only `postgres` in detached mode with `POSTGRES_PORT=15432`. |
-| `02 - Backend` | Spring Boot | Starts PostgreSQL as a Before Launch task, then the local JVM with `DB_HOST=localhost` and `DB_PORT=15432`. |
-| `03 - Frontend` | npm | Runs `npm run start` from `frontend/package.json`, opens `http://localhost:4200` in Chrome and starts the browser JavaScript debugger. |
-| `DEV - Full Stack` | Compound | Starts `02 - Backend` and `03 - Frontend` together. PostgreSQL is supplied by the backend prerequisite. |
-| `DEMO - Full Stack` | Docker Compose | Builds and starts `postgres`, `backend` and `frontend` from the existing `compose.yaml`, equivalent to `docker compose up --build`. |
-| `TEST - Backend` | Gradle | Runs `test` in `backend/` with the project Gradle JVM. Testcontainers supplies isolated PostgreSQL containers. |
-| `TEST - Frontend` | npm | Runs `npm test` from `frontend/package.json`: Angular unit/component tests with HTTP mocks and ChromeHeadless. |
-
-## TEST: isolated test runs
-
-**TEST - Backend → Run** executes all backend tests. **Debug** attaches to the test JVM and supports breakpoints in Kotlin tests and application code. The profile enables **Run as test**, so each launch reruns the tests even when Gradle considers them up to date. Gradle script debugging is disabled. A running Docker daemon is required; there is no Before Launch dependency on `01 - PostgreSQL` or the shared database on port `15432`.
-
-**TEST - Frontend → Run** uses the existing `test` script, which already specifies `--watch=false --browsers=ChromeHeadless`. Install Chrome locally; for a nonstandard browser location, supply `CHROME_BIN` in the local launch environment. The profile uses the project Node 20 runtime and has no backend, PostgreSQL or Docker prerequisite.
-
-For a single Kotlin test, use its gutter **Debug** action. For TypeScript test breakpoints, use the test's gutter **Debug** action with IntelliJ's Karma integration; debugging the npm process alone does not attach to browser tests. The [Karma plugin](https://www.jetbrains.com/help/idea/running-unit-tests-on-karma.html) must be installed and enabled for this workflow.
-
-## DEV: Run, Debug and reload
-
-Select **DEV - Full Stack → Run** for local development, or **Debug** for Kotlin and TypeScript breakpoints. The backend runs on JDK 21 and the frontend uses the project Node runtime. Browser JavaScript debugging is enabled for both actions.
-
-The IDEA DEV database mapping is always `127.0.0.1:15432 → postgres:5432`; port `5432` inside the container is unchanged. Existing development database defaults are reused.
-
-The frontend and backend can start in parallel, so the page may become available before backend readiness turns `UP`. Angular keeps the existing `/api` proxy to `http://localhost:8080`; use **Retry** if the initial wallet request arrives before the backend is ready.
-
-Angular watches source files and reloads the browser. Spring Boot DevTools restarts the backend when compiled classes or resources change; use **Build Project** after backend edits. Kotlin breakpoints work directly in backend sources, and browser source maps support TypeScript breakpoints. If a startup breakpoint was passed before the browser debugger attached, reload the page.
-
-Use IntelliJ's **Stop** menu to stop the DEV child sessions together (or **Stop All** when only this stack is running). The detached PostgreSQL service remains available. Stop it separately in Docker Services or with `docker compose stop postgres`; its named volume is preserved. Close the debug Chrome window before a fresh launch if IDEA reports that its browser profile is already in use.
-
-## DEMO and CLI
-
-Stop the local DEV processes before launching DEMO because both modes use host ports `8080` and `4200`. DEMO builds both application images and retains the existing Compose healthchecks and startup dependencies. Stop the stack through Docker Services or `docker compose stop`; do not select volume removal.
-
-DEMO uses normal Compose environment settings: PostgreSQL defaults to host port `15432`, also without `.env`. Override `POSTGRES_PORT` through `.env` or the shell if needed; the backend container continues to connect to `postgres:5432`.
-
-All CLI workflows remain independent of IntelliJ, including `docker compose up --build`, `DB_PORT=15432 ./gradlew bootRun`, `npm start` and `./scripts/verify.sh`.
-
----
-
-# DEV vs DEMO
-
-Use **DEV mode** when:
-
-- writing backend code;
-- debugging Kotlin;
-- writing frontend code;
-- debugging TypeScript;
-- using hot reload;
-- iterating quickly.
-
-```text
-PostgreSQL Docker
-+
-local Spring Boot
-+
-local Angular
-```
-
-Use **DEMO mode** when:
-
-- validating the delivered application;
-- reproducing reviewer setup;
-- testing Docker images;
-- testing Nginx;
-- verifying service startup ordering;
-- performing a clean-clone smoke test.
-
-```text
-PostgreSQL Docker
-+
-backend Docker
-+
-frontend Docker
-```
-
-Do not use full Docker image rebuilds as the normal source-code development loop.
-
----
-
-# Configuration
-
-Local backend database name and credentials match `.env.example`. Set `DB_PORT=15432` for a local JVM to use the default Compose host mapping; the backend container uses `postgres:5432`.
-
-Supported backend environment variables:
-
-```text
-DB_HOST
-DB_PORT
-DB_NAME
-DB_USER
-DB_PASSWORD
-SERVER_PORT
-```
-
-Example:
-
-```bash
-export DB_HOST=localhost
-export DB_PORT=15432
-
-cd backend
-./gradlew bootRun
-```
-
-Spring Boot does not automatically load the repository root `.env` file during direct local execution.
-
-Docker Compose maps its PostgreSQL configuration into the backend container automatically.
-
----
-
-# Verification
-
-Run the full local verification pipeline from the repository root:
+### Verification
 
 ```bash
 ./scripts/verify.sh
 ```
 
-The script works from any current directory.
+This requires the local DEV/test toolchain and runs:
 
-It performs:
+- Backend Gradle checks, tests and executable `bootJar` build.
+- Frontend `npm ci`, headless tests and production build.
+- Docker Compose configuration validation.
 
-```text
-Backend
-  -> Gradle check
-  -> backend tests
-  -> executable bootJar
+It does not start the full demo stack. Conversely, `start-demo.sh` builds, starts and checks health without running this test pipeline.
 
-Frontend
-  -> npm ci
-  -> headless Karma/Jasmine tests
-  -> Angular production build
+Backend integration tests use isolated PostgreSQL Testcontainers, not the shared demo database or H2. They require Docker but no prior `01 - PostgreSQL` startup. Frontend tests use HTTP mocks and require no running backend. Set `CHROME_BIN` if Chrome/Chromium is not detected.
 
-Infrastructure
-  -> Docker Compose configuration validation
-```
+Tests cover money boundaries, schema constraints, HMAC/idempotency, rollback, bonus lifecycle, concurrency, UI validation, EN/UK and stale-response protection. Kotlin warnings-as-errors, strict TypeScript and Angular template checking remain enabled.
 
-Backend verification uses:
+## Business Rules
 
-```bash
-./gradlew --no-daemon check bootJar
-```
+- **Money:** EUR uses Kotlin `BigDecimal` and PostgreSQL `NUMERIC(19,2)`. Deposit/round inputs are decimal strings with at most two fractional digits; responses use exactly two. Excess precision is rejected, not silently rounded. The frontend performs no authoritative money arithmetic.
+- **Deposits:** creation leaves the deposit `PENDING` without crediting balances. Completion credits its stored amount once.
+- **Welcome bonus:** the first qualifying completed deposit of at least `20.00` grants `min(deposit, 100.00)` once per player. Smaller deposits do not consume eligibility; an earlier qualifying completion does.
+- **Wagering and lifetime:** target is the original bonus ×20; the full stake advances progress while the bonus is `ACTIVE`. Lifetime is seven days (168 hours) from grant.
+- **Stake:** spend real funds first, then active bonus funds. Every stake is limited to `5.00` while a bonus is `ACTIVE`, including fully real-funded stakes. Without an active bonus, use real funds only and apply no bonus stake cap.
+- **Payout:** `totalWin` is total payout, not net profit. Allocate proportionally to the actual stake: round the real share once to cents with `HALF_UP`, then give the bonus share the exact remainder.
+- **Completion:** reaching or exceeding the wagering target converts the remaining bonus balance to real money. A completing round settles its payout before conversion.
+- **Expiration:** at or after the deadline, an incomplete active bonus forfeits its remaining balance; real money is unchanged. Completed wagering takes priority over expiration. Terminal status is retained and repeated resolution is idempotent.
 
-Tests requiring PostgreSQL use a real PostgreSQL Testcontainer.
+Lifecycle resolution is lazy, using an injected `Clock`, with no scheduler. It occurs on wallet summary, valid matching pending-deposit completion and round execution. **Reading the wallet can therefore commit conversion or forfeiture.** Pending-deposit creation, invalid signatures, amount mismatches and completed duplicate callbacks do not trigger it.
 
-H2 is not used.
+## API Summary
 
-Required checks are never silently skipped.
+All routes operate on one seeded demo player, without authentication or a client-selected player ID. Angular calls relative `/api` paths.
 
-A successful verification means:
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/wallet` | Current balances and bonus metadata after lifecycle resolution. |
+| POST | `/api/deposits` | Create a pending deposit from an `amount` decimal string; HTTP 201. |
+| POST | `/api/provider/deposits/callback` | Complete a deposit using its ID, integer cents and a valid HMAC signature. |
+| POST | `/api/demo/deposits/{depositId}/complete` | Reviewer-only completion of the stored deposit amount, without a request body. |
+| POST | `/api/rounds/play` | Play and settle a deterministic round atomically; HTTP 200. |
+| GET | `/api/ledger` | Read paginated, newest-first transaction history. |
 
-```text
-source code compiles
-+
-tests pass
-+
-production artifacts build
-+
-Compose configuration is valid
-```
+Wallet `bonus` is `null` before a grant; otherwise it includes `status`, `initialAmount`, `wageringProgress`, `wageringTarget` and `expiresAt`, including after completion/expiration. Timestamps use UTC ISO format.
 
-It does not automatically start the long-lived full stack.
+Ledger pagination uses `page=0&size=20` by default, with size 1–100. Responses contain `items`, `page`, `size`, `totalElements` and `totalPages`; ordering is `created_at DESC, id DESC`. Signed `amount` and `balanceAfter` remain decimal strings. Each page has a consistent database snapshot; later page requests may see newly committed entries.
 
----
+### Provider callback and demo completion
 
-# Full-Stack Smoke Test
+The provider body contains a UUID `depositId` and positive JSON integer `amountCents`. `X-Signature` is the 64-character hexadecimal HMAC-SHA256 of the **exact raw body bytes**, using the backend's `PAYMENT_PROVIDER_HMAC_SECRET`. Verification uses constant-time digest comparison before JSON parsing; reformatting the body requires a new signature.
 
-The complete Docker stack is verified separately.
+A matching repeated callback returns HTTP 200 with `COMPLETED` without another credit, including after restart. A mismatched amount is rejected even for an already completed deposit. Both completion endpoints return the deposit ID and status.
 
-```bash
-docker compose config --quiet
+**The demo endpoint is not a production payment endpoint.** The UI uses it to complete the stored amount through the same core transaction; it collects no payment and exposes no HMAC secret/signature to the browser. Disable or remove it before real deployment. The backend property `demo.enabled=false` disables it; in Compose, that setting must be passed explicitly to the backend container.
 
-docker compose build
+### Round example
 
-docker compose up -d --wait --wait-timeout 180
-
-docker compose ps
-
-curl --fail \
-  http://localhost:8080/actuator/health/liveness
-
-curl --fail \
-  http://localhost:8080/actuator/health/readiness
-
-curl --fail \
-  http://localhost:8080/actuator/metrics
-
-curl --fail -i \
-  -H 'X-Request-ID: reviewer-check' \
-  http://localhost:8080/api/wallet
-
-curl --fail -i \
-  -H 'X-Request-ID: reviewer-proxy-check' \
-  http://localhost:4200/api/wallet
-
-curl --fail \
-  http://localhost:4200/health
-
-curl --fail \
-  http://localhost:4200/
-
-docker compose exec frontend \
-  wget -qO- \
-  http://backend:8080/actuator/health/readiness
-
-docker compose logs backend frontend
-
-docker compose down
-```
-
-Expected:
-
-```text
-postgres  -> healthy
-backend   -> healthy
-frontend  -> healthy
-```
-
-Backend readiness verifies real PostgreSQL connectivity.
-
-Both wallet requests must return HTTP `200`, decimal strings (`0.00 / 0.00` and `bonus: null` on a fresh database), and the supplied `X-Request-ID`. Backend startup logs show the Flyway migration result; on an empty database V1–V6 are applied. Existing volumes retain their balances and history.
-
-Before shutting down the stack, also exercise the deposit examples above: creation leaves balances/history unchanged; the signed callback credits exactly once; a duplicate remains successful; an invalid signature returns `401`; a freshly signed mismatched amount returns `409`. Verify the resulting wallet and ledger through Nginx, restart the backend and retry the matching callback to verify durable idempotency. These operations intentionally persist demo history; do not delete the PostgreSQL volume to reset it. Automated financial/schema tests use disposable Testcontainers databases instead.
-
-For the Stage 4 financial smoke on a fresh wallet, create a `10.00` deposit and verify that the pending deposit leaves the wallet at `0.00`. Complete it with a signed `amountCents: 1000` callback, then verify `10.00` and one deposit ledger entry. Play `{"stake":"8.00","totalWin":"0.00"}` through Nginx and verify HTTP `200`, wallet `2.00 / 0.00`, one `ROUND_STAKE` entry of `-8.00` with `balanceAfter: "2.00"`, and no `ROUND_WIN`. Check the supplied `X-Request-ID` on wallet, round and ledger responses and confirm that all services remain healthy. This example requires no active bonus; with an active bonus use legal stakes in the Stage 5 smoke below. If the volume already contains financial history, record its reconciled opening balance and account for these new mutations; never prepare the scenario by editing wallet balances directly. The mandatory simultaneous `8.00 + 8.00` contention proof runs in automated PostgreSQL integration tests.
-
-Liveness remains independent from PostgreSQL so the JVM process can remain alive and recover from a temporary database outage.
-
-For a bonus smoke with no prior qualifying completion, complete deposits of `19.99` and `20.00`. On a fresh wallet this produces `39.99 / 20.00`, one active bonus with target `400.00` and zero progress. Reject `5.01`, verifying unchanged state, then use legal losing stakes of at most `5.00` to reduce real funds and exercise a mixed winning round. Verify the persisted allocation, both wallet types in `/api/ledger`, full-stake wagering progress, request IDs and independent balance reconciliation. Account for any existing reconciled balance; do not edit wallet balances or delete the demo volume to prepare this scenario.
-
-For Stage 6, perform deposit creation and demo completion from the browser, then play a valid round and an over-limit/insufficient-funds round. Verify bonus metadata, refreshed balances/history, pagination and EN/UK, including error translations. Inspect the browser console/network: no unexpected errors, and no provider secret or signature in frontend requests/assets. To reach completion without waiting, use funded neutral rounds (`stake = totalWin`, stake at most `5.00` while active) through the public API until the target is reached, then refresh the browser and verify the converted balance and exactly one conversion pair. Expiration boundaries and expiration-plus-rejection are covered by controlled-Clock integration tests; do not change runtime clocks or database timestamps for the smoke.
-
----
-
-# Manual DEV Smoke Test
-
-For a quick manual verification of the local development workflow:
-
-## PostgreSQL
-
-```bash
-POSTGRES_PORT=15432 docker compose up -d postgres
-```
-
-Verify:
-
-```bash
-docker compose ps postgres
-```
-
-Expected:
-
-```text
-healthy
-```
-
-## Backend
-
-```bash
-cd backend
-DB_PORT=15432 ./gradlew bootRun
-```
-
-Verify:
-
-```bash
-curl -s \
-  http://localhost:8080/actuator/health/liveness
-
-curl -s \
-  http://localhost:8080/actuator/health/readiness
-```
-
-Expected:
+With `10.00` real balance and no active bonus, request `POST /api/rounds/play`:
 
 ```json
-{"status":"UP"}
+{"stake":"4.00","totalWin":"10.00"}
 ```
 
-## Frontend
+HTTP 200:
 
-```bash
-cd frontend
-npm start
+```json
+{
+  "roundId": "<server-generated UUID>",
+  "stake": "4.00",
+  "totalWin": "10.00",
+  "realBalance": "16.00",
+  "bonusBalance": "0.00"
+}
 ```
 
-Open:
+The result is `10.00 - 4.00 + 10.00 = 16.00`. Stake must be positive; payout may be zero. Values must fit `NUMERIC(19,2)` (maximum `99999999999999999.99`); JSON numeric amounts and exponent notation are not accepted. Allocation is server-owned, and client-supplied allocation fields are rejected.
 
-```text
-http://localhost:4200
-```
+### Errors
 
-The page loads the wallet from `/api/wallet` and displays:
+Errors use Spring `ProblemDetail` with a stable `code`; internal SQL and stack traces are not returned.
 
-```text
-Casino Wallet
-
-Real balance
-0.00 EUR
-
-Bonus balance
-0.00 EUR
-```
-
-## Proxy verification
-
-```bash
-curl -i \
-  -H 'X-Request-ID: manual-proxy-test' \
-  http://localhost:4200/api/wallet
-```
-
-Expected:
-
-```text
-HTTP 200
-X-Request-ID: manual-proxy-test
-
-{"realBalance":"0.00","bonusBalance":"0.00"}
-```
-
-This confirms the wallet read path through:
-
-```text
-Angular development server
-       ↓
-proxy.conf.json
-       ↓
-Spring Boot
-       ↓
-PostgreSQL
-```
-
----
-
-# Reliability Strategy
-
-Stage 6 implements real deposit credits, one-time welcome grants, synchronous real/mixed-funds rounds, bonus completion and lazy expiration. Financial writes follow these rules:
-
-- PostgreSQL is the only durable transactional system.
-- Each balance-changing use case executes in one application-service transaction.
-- Transaction isolation is `READ_COMMITTED`.
-- Wallet-changing operations use `SELECT ... FOR UPDATE`.
-- Global lock order is wallet first, then the related deposit when required.
-- Wallet changes, ledger entries and related domain state commit or roll back together.
-- `REQUIRES_NEW` is not used for financial sub-operations.
-- External network calls are not performed while a financial transaction is open.
-- Financial success is returned only after the database transaction commits.
-
-Money uses:
-
-```text
-Kotlin      -> BigDecimal
-PostgreSQL  -> NUMERIC(19,2)
-```
-
-Binary floating-point values are not used for authoritative money calculations.
-
-Database constraints provide a second protection layer through:
-
-```text
-NOT NULL
-CHECK
-UNIQUE
-FOREIGN KEY
-append-only protections
-```
-
-The wallet has a primary key, required balances and nonnegative checks. Deposit/round constraints, signed ledger checks, unique financial operations, append-only enforcement and wallet-first row locks protect the implemented financial flows.
-
----
-
-# Consistency Strategy
-
-Financial state uses strong consistency.
-
-PostgreSQL is the single source of truth for real and bonus balances, deposits, bonus metadata, wagering progress and durable callback idempotency.
-
-The `wallet` table contains the current real and bonus balances. Welcome grants, mixed rounds, conversion and forfeiture update money; all non-zero financial changes have matching ledger entries in the same transaction.
-
-The ledger is append-only history written in the same transaction as each balance change; the wallet remains the authoritative current state.
-
-Bonus metadata stores the original grant and wagering state without duplicating the mutable current bonus balance.
-
-The frontend treats backend responses as authoritative and does not perform authoritative financial calculations.
-
-Redis, local caches and TTL-based keys are intentionally excluded from financial consistency and idempotency.
-
----
-
-# Observability
-
-The project provides a lightweight observability baseline without deploying a separate monitoring platform.
-
-## Backend
-
-Spring Boot Actuator exposes:
-
-```text
-/actuator/health
-/actuator/health/liveness
-/actuator/health/readiness
-/actuator/info
-/actuator/metrics
-```
-
-Micrometer provides built-in JVM, HTTP and datasource metrics.
-
-Sensitive Actuator endpoints and sensitive health details are not exposed.
-
----
-
-## Request Correlation
-
-The implemented error/logging paths are:
-
-| Boundary | Controlled outcomes | Logging |
+| HTTP | Code(s) | Meaning |
 |---|---|---|
-| Wallet summary | Lifecycle resolution, balance-limit conflict, safe technical failure | Lifecycle success after commit; one `api_failure` for unexpected failure |
-| Deposit creation | Invalid amount/request; pending creation | `deposit_created` after commit |
-| Signed callback | Invalid signature/body, unknown deposit, mismatch, balance limit, duplicate success | `deposit_callback_completed`, duplicate flag, optional `welcome_bonus_granted`, after commit |
-| Demo completion | Unknown/invalid ID, balance limit, duplicate success; same financial transaction | `demo_deposit_completed`, duplicate flag, optional grant, after commit |
-| Round | Invalid input, max bet, insufficient funds, balance limit | `round_completed` after commit; controlled rejection without a stack trace |
-| Ledger | Invalid pagination; safe database failure | Shared request/error handling |
-| Bonus lifecycle | Completion, expiration, no-op repeat, technical rollback | `bonus_completed` / `bonus_expired` only after commit; caller reports failures once |
-| Actuator | Liveness independent of DB; readiness `503` when DB unavailable | Framework health handling; details/components hidden |
-| Correlation filter | Every request outcome, including failure | One INFO `http_request`; MDC cleared in `finally` |
+| 400 | `INVALID_DEPOSIT_AMOUNT`, `INVALID_ROUND_AMOUNT` | Invalid amount format, precision, sign or range. |
+| 400 | `INVALID_CALLBACK`, `INVALID_REQUEST`, `INVALID_PAGINATION` | Invalid request body or pagination. |
+| 401 | `INVALID_SIGNATURE` | Missing or invalid provider signature. |
+| 404 | `DEPOSIT_NOT_FOUND` | Completion refers to an unknown deposit. |
+| 409 | `DEPOSIT_AMOUNT_MISMATCH` | Callback amount differs from the stored deposit. |
+| 409 | `INSUFFICIENT_FUNDS`, `MAX_BET_EXCEEDED` | The round cannot satisfy current funds/bonus rules. |
+| 409 | `WALLET_BALANCE_LIMIT` | A credit or conversion would exceed the balance range. |
+| 500 | `INTERNAL_ERROR` | Sanitized unexpected technical failure. |
 
-All application errors use sanitized Problem Details and stable codes. Known `401`/`409` rejections log WARN; other controlled client errors log INFO. They do not log ERROR stack traces. Unexpected application and response-serialization failures return `500 / INTERNAL_ERROR` and log one ERROR with exception type, sanitized cause types, original stack frames and request ID. Exception messages are omitted because JDBC causes may include SQL or payload values. Lower layers do not log-and-rethrow. The separate INFO completion record is not a second error trace. Existing Actuator/Micrometer HTTP/JVM metrics remain; no new custom metrics or monitoring services were added.
+## Reliability and Concurrency
 
-The backend supports:
+- PostgreSQL is the financial source of truth. Current balances live in `wallet`; the ledger is audit history, not a runtime balance replay.
+- Each financial write uses one application-service `READ_COMMITTED` transaction. Wallet changes, ledger and related deposit/bonus/round state commit or roll back together; success is returned only after commit.
+- `SELECT ... FOR UPDATE` serializes wallet changes. Lock order is **wallet → related deposit when required**. There is no optimistic retry machinery, independent `REQUIRES_NEW` financial work or network call inside the transaction.
+- Explicit `UPDATE ... RETURNING` supplies authoritative balances after mutation. Database checks, unique keys and foreign keys reinforce nonnegative balances, valid allocations, ledger signs and operation uniqueness.
+- Every non-zero balance change has a ledger entry. Zero payout creates no win entry. PostgreSQL rejects ledger `UPDATE`, `DELETE` and `TRUNCATE`; schema administration remains the database owner's responsibility.
+- Rejected rounds create no round, stake/win entry or wagering progress. Prior lifecycle resolution can still commit with an expected business rejection such as HTTP 409; technical failures roll back the whole transaction.
 
-```text
-X-Request-ID
-```
+Real PostgreSQL tests prove that **two concurrent losing bets of 8.00 against 10.00, without an active bonus, produce exactly one success, one `INSUFFICIENT_FUNDS` rejection and a final balance of 2.00**. They verify actual database blocking, not just simultaneous thread starts.
 
-Accepted caller IDs match:
+Tests also cover concurrent callbacks/grants/progress, transaction rollback and separate REAL/BONUS wallet-to-ledger reconciliation. Financial fixtures include matching history instead of directly editing wallet balances.
 
-```text
-[A-Za-z0-9._-]{1,128}
-```
+## Observability
 
-Otherwise a new UUID is generated.
+| Default URL | Purpose |
+|---|---|
+| [Backend readiness](http://localhost:8080/actuator/health/readiness) | Includes PostgreSQL connectivity; used by Compose. |
+| [Backend health](http://localhost:8080/actuator/health) | Aggregate health. |
+| [Backend liveness](http://localhost:8080/actuator/health/liveness) | JVM liveness independent of PostgreSQL. |
+| [Backend metrics](http://localhost:8080/actuator/metrics) | Micrometer JVM, HTTP and datasource metrics. |
+| [Frontend health](http://localhost:4200/health) | Nginx healthcheck. |
 
-The effective request ID:
+PostgreSQL uses `pg_isready`. Actuator also exposes `/actuator/info`; sensitive health details and other management endpoints are not exposed.
 
-- is returned in the response;
-- is stored in MDC during request processing;
-- is removed from MDC in `finally`;
-- appears in request-completion logs.
+Nginx and the backend propagate `X-Request-ID`, generating a replacement when necessary, and return it in responses and structured logs. Request-scoped MDC is cleared in `finally`.
 
-Completion logs contain:
+Application logs go to stdout/stderr; Nginx provides access/error logs. Business successes are logged after commit, expected rejections are concise, and unexpected failures receive sanitized error logging. Credentials, HMAC secrets, signatures, authorization values and raw callback bodies are never logged.
 
-```text
-request_id
-method
-path
-status
-duration
-```
+## Security / Angular 17 Constraint
 
-The application does not log:
+Angular is pinned to **17.3.12** because the assignment requires Angular 17. Known npm audit findings remain; no forced major upgrade or unsafe dependency override is applied.
 
-- request bodies;
-- query strings;
-- credentials;
-- secrets;
-- signatures;
-- authorization values.
+Audit snapshot on **2026-09-24**:
 
----
+| Audit | Findings |
+|---|---|
+| `npm audit --omit=dev` | 6: 3 moderate, 3 high |
+| `npm audit` | 48: 4 low, 20 moderate, 23 high, 1 critical |
 
-## Nginx
+Counts may change as advisories are published. A green build does not imply a clean security audit. A production deployment should upgrade to a supported Angular version before release.
 
-Nginx:
+The application is a client-side SPA without SSR or dynamic HTML rendering. Default database credentials and the default provider secret are disposable demo values, not production credentials; real secrets belong in backend environment configuration and must never be committed.
 
-- exposes `/health`;
-- propagates `X-Request-ID`;
-- writes access logs to stdout;
-- writes error logs to stderr;
-- records status;
-- records request duration;
-- records upstream duration.
+## Assumptions and Intentional Exclusions
 
----
+One deterministic demo player is seeded. `totalWin` is trusted demo input, with no randomness or external game provider; production payout authority would belong to a trusted provider. Each valid play request represents a new round, with no invented round idempotency key.
 
-## Docker Compose Healthchecks
+Production authentication, external payment/game providers, Redis, Kafka, Kubernetes, an API gateway and a centralized monitoring/tracing stack are outside this assignment's scope.
 
-```text
-PostgreSQL -> pg_isready
-Backend    -> Actuator readiness
-Frontend   -> /health
-```
+Project references:
 
-Operational inspection:
-
-```bash
-docker compose ps
-docker compose logs -f
-```
-
----
-
-# Angular 17 Security Constraint
-
-Angular 17 is explicitly required by the assignment and is therefore pinned to:
-
-```text
-17.3.12
-```
-
-Angular 17 is no longer within the upstream Angular support window.
-
-At the Stage 6 review:
-
-```bash
-npm audit --omit=dev
-```
-
-reports:
-
-```text
-6 vulnerabilities
-3 moderate
-3 high
-```
-
-in Angular 17 runtime packages.
-
-A complete:
-
-```bash
-npm audit
-```
-
-reports 48 findings (4 low, 20 moderate, 23 high, 1 critical), including Angular build/test dependencies and deprecated transitive packages. The only Stage 6 dependency addition is `@angular/forms@17.3.12`, required for Reactive Forms and aligned with the pinned Angular runtime. Counts describe the audit at review time and may change as advisories are published.
-
-Automated remediation proposes upgrading Angular to a newer major version, which would violate the explicit Angular 17 requirement.
-
-Therefore the project intentionally does not run:
-
-```bash
-npm audit fix --force
-```
-
-and does not introduce dependency overrides that create an unsupported mixed Angular dependency graph.
-
-The application remains a simple client-side SPA and does not introduce:
-
-- Angular SSR;
-- hydration;
-- runtime template compilation;
-- dynamic HTML rendering;
-- unnecessary third-party UI frameworks.
-
-For a real production deployment, Angular should be upgraded to a currently supported version before release.
-
-References:
-
-- https://angular.dev/reference/releases
-- https://angular.dev/reference/versions
-
-A green build does not imply a clean dependency-security audit.
-
-Known dependency risks are documented rather than hidden.
-
----
-
-# Intentional Exclusions
-
-The following components are intentionally outside this assignment:
-
-- Redis;
-- Kafka;
-- API Gateway;
-- Kubernetes;
-- Prometheus server;
-- Grafana;
-- Elasticsearch;
-- Logstash;
-- Kibana;
-- WatchDog;
-- distributed tracing infrastructure;
-- production authentication;
-- speculative business dashboards.
-
-They are not required for ACID guarantees or correctness of this application.
-
-Possible production extensions include:
-
-- centralized metrics;
-- centralized logs;
-- distributed tracing;
-- managed PostgreSQL;
-- authentication;
-- secrets management;
-- production backup and replication.
-
-They should be introduced only when corresponding operational requirements exist.
-
----
-
-# Development Approach
-
-Implementation proceeds through small vertical slices.
-
-Every stage must:
-
-1. have a clearly bounded scope;
-2. produce a reviewable diff;
-3. include relevant tests;
-4. finish with a green build;
-5. preserve the DEV workflow;
-6. preserve the DEMO Docker Compose workflow;
-7. keep documentation aligned with actual behaviour;
-8. stop before the next stage until reviewed.
-
-The detailed roadmap is maintained in:
-
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
+- [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) — implementation roadmap and remaining delivery work.
+- [NOTES.md](NOTES.md) — approved business assumptions.
+- [DEVELOPMENT_STRATEGY.md](DEVELOPMENT_STRATEGY.md) — engineering, testing and review approach.

@@ -448,32 +448,42 @@ Frontend:
 
 ---
 
-## Stage 7 — CI, Clean-Clone Verification and Pull Request Delivery
+## Stage 7 — Clean-Clone Verification and Pull Request Delivery
 
 ### Goal
 
-Make the delivered solution reproducible and review-ready.
+Verify the solution from a clean checkout and prepare the repository for the final GitHub Pull Request.
 
 ### Outcome
 
-- CI runs the same verification used locally;
-- clean clone builds and tests successfully;
-- full Compose smoke test succeeds;
-- README and NOTES reflect actual behaviour;
-- final GitHub Pull Request is ready for review.
+- clean checkout passes all backend and frontend tests and production builds;
+- full Compose build and smoke test succeed with all three services healthy;
+- README and NOTES reflect actual behaviour and the reproducible reviewer workflow;
+- repository hygiene, secrets and generated files are reviewed;
+- repository is PR-ready, with a final verification summary for the user.
 
 ### Definition of Done
 
-A clean checkout can successfully run:
+With the documented prerequisites, a clean checkout must pass `./scripts/verify.sh`
+and reproduce the full stack using `docker compose up --build`:
 
 ```text
-tests
-→ builds
+all backend and frontend tests
+→ production builds
 → Docker image builds
 → Docker Compose
 → healthchecks
 → smoke verification
 ```
+
+All three services must become healthy and pass the documented smoke checks.
+
+The clean-checkout workflow must not depend on:
+
+- `.idea` or machine-specific paths;
+- an existing `.env`;
+- previous Docker containers or PostgreSQL data;
+- local build output, `node_modules` or Gradle caches.
 
 The final diff contains no:
 
@@ -482,6 +492,11 @@ The final diff contains no:
 - IDE files;
 - private `docs/`;
 - unrelated changes.
+
+The agent prepares the repository and a final summary of verification results,
+known limitations and remaining delivery steps. The user owns Git staging,
+commits, push and final Pull Request creation. The agent does not create or
+submit the Pull Request.
 
 ---
 
