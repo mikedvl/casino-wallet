@@ -280,6 +280,10 @@ Open [Grafana](http://localhost:3000), [Kibana](http://localhost:5601) or [Jaege
 
 Normal `docker compose up --build` and `./scripts/start-demo.sh` still start only the three application services, without trace export. Monitoring is not required by the assignment or for financial correctness/readiness. See [OBSERVABILITY.md](OBSERVABILITY.md) for correlation, queries, shutdown, monitoring-only cleanup and security limitations.
 
+<a href="assets/architecture/casino-wallet-observability-architecture.png">
+  <img src="assets/architecture/casino-wallet-observability-architecture.png" alt="Casino Wallet application architecture with optional metrics, logs and distributed tracing" width="100%">
+</a>
+
 ## Security / Angular 17 Constraint
 
 Angular is pinned to **17.3.12** because the assignment requires Angular 17. Known npm audit findings remain; no forced major upgrade or unsafe dependency override is applied.

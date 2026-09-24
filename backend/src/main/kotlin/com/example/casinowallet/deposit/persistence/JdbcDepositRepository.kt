@@ -4,6 +4,7 @@ import com.example.casinowallet.deposit.domain.Deposit
 import com.example.casinowallet.deposit.domain.DepositStatus
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
+import java.math.BigDecimal
 import java.util.UUID
 
 @Repository
@@ -43,9 +44,9 @@ class JdbcDepositRepository(private val jdbc: NamedParameterJdbcTemplate) {
         ) == 1) { "Expected one pending deposit" }
     }
 
-    fun hasCompletedQualifyingDeposit(playerId: UUID): Boolean = checkNotNull(jdbc.queryForObject(
+    fun hasCompletedQualifyingDeposit(playerId: UUID, minimumAmount: BigDecimal): Boolean = checkNotNull(jdbc.queryForObject(
         // language=PostgreSQL
-        "select exists(select 1 from deposit where player_id = :playerId and status = 'COMPLETED' and amount >= 20.00)",
-        mapOf("playerId" to playerId), Boolean::class.java,
+        "select exists(select 1 from deposit where player_id = :playerId and status = 'COMPLETED' and amount >= :minimumAmount)",
+        mapOf("playerId" to playerId, "minimumAmount" to minimumAmount), Boolean::class.java,
     ))
 }

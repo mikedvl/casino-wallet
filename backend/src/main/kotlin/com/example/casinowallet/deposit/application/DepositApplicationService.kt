@@ -56,7 +56,10 @@ class DepositApplicationService(
         ledger.appendDeposit(playerId, id, deposit.amount, balance)
         // Current deposit is still PENDING; older qualifying completions also consume lifetime eligibility.
         val grant = WelcomeBonusGrant.fromDeposit(deposit.amount, clock.instant())?.takeIf {
-            !bonuses.existsForPlayer(playerId) && !deposits.hasCompletedQualifyingDeposit(playerId)
+            !bonuses.existsForPlayer(playerId) && !deposits.hasCompletedQualifyingDeposit(
+                playerId,
+                minimumAmount = WelcomeBonusGrant.MINIMUM_QUALIFYING_DEPOSIT,
+            )
         }
         if (grant != null) {
             bonuses.insert(playerId, id, grant)
