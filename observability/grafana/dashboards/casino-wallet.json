@@ -1,0 +1,840 @@
+{
+  "uid": "casino-wallet",
+  "title": "Casino Wallet · Operations",
+  "description": "Optional local metrics. Financial truth remains in PostgreSQL. Rates need at least two scrapes; counters reset with the backend process.",
+  "tags": [
+    "casino-wallet"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "15s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Backend scrape",
+      "type": "stat",
+      "description": "Prometheus can scrape the backend; this is not a database connectivity check.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "min(up{job=\"casino-wallet\"})",
+          "legendFormat": "Backend",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Readiness · PostgreSQL",
+      "type": "stat",
+      "description": "Actuator readiness evaluated at scrape time, including the existing PostgreSQL health contributor.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "min(casino_wallet_readiness{job=\"casino-wallet\"})",
+          "legendFormat": "Readiness",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Process CPU",
+      "type": "stat",
+      "description": "CPU usage reported by the backend JVM.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "process_cpu_usage{job=\"casino-wallet\"}",
+          "legendFormat": "CPU",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "JVM live threads",
+      "type": "stat",
+      "description": "Current live JVM threads.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "jvm_threads_live_threads{job=\"casino-wallet\"}",
+          "legendFormat": "Threads",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Application request rate",
+      "type": "timeseries",
+      "description": "Application /api routes only; excludes healthchecks and Prometheus scrapes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "sum(rate(http_server_requests_seconds_count{job=\"casino-wallet\",uri=~\"/api/.*\"}[$__rate_interval]))",
+          "legendFormat": "Requests/s",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Application 4xx / 5xx rate",
+      "type": "timeseries",
+      "description": "Zero when no error series exists. Check the scrape/readiness panels before interpreting an absence of errors.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "sum(rate(http_server_requests_seconds_count{job=\"casino-wallet\",uri=~\"/api/.*\",status=~\"4..\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "4xx",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "sum(rate(http_server_requests_seconds_count{job=\"casino-wallet\",uri=~\"/api/.*\",status=~\"5..\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "5xx",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Application latency",
+      "type": "timeseries",
+      "description": "Latency of /api requests. No traffic means no latency estimate; histogram quantile is approximate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{job=\"casino-wallet\",uri=~\"/api/.*\"}[$__rate_interval])))",
+          "legendFormat": "p95",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "sum(rate(http_server_requests_seconds_sum{job=\"casino-wallet\",uri=~\"/api/.*\"}[$__rate_interval])) / sum(rate(http_server_requests_seconds_count{job=\"casino-wallet\",uri=~\"/api/.*\"}[$__rate_interval]))",
+          "legendFormat": "Mean",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "JVM heap",
+      "type": "timeseries",
+      "description": "Sum of the backend JVM heap pools.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "sum(jvm_memory_used_bytes{job=\"casino-wallet\",area=\"heap\"})",
+          "legendFormat": "Used",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "sum(jvm_memory_max_bytes{job=\"casino-wallet\",area=\"heap\"})",
+          "legendFormat": "Max",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Hikari connection pool",
+      "type": "timeseries",
+      "description": "Current pool usage and waiting threads; readiness above verifies actual PostgreSQL connectivity.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "hikaricp_connections_active{job=\"casino-wallet\"}",
+          "legendFormat": "{{pool}} active",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "hikaricp_connections_idle{job=\"casino-wallet\"}",
+          "legendFormat": "{{pool}} idle",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "hikaricp_connections_pending{job=\"casino-wallet\"}",
+          "legendFormat": "{{pool}} waiting",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "hikaricp_connections_max{job=\"casino-wallet\"}",
+          "legendFormat": "{{pool}} maximum",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Hikari connection timeout rate",
+      "type": "timeseries",
+      "description": "Connection acquisition timeouts reported by the backend pool.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "rate(hikaricp_connections_timeout_total{job=\"casino-wallet\"}[$__rate_interval])",
+          "legendFormat": "{{pool}} timeouts/s",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Deposit outcomes · since backend start",
+      "type": "timeseries",
+      "description": "Controller-dispatched provider callbacks and demo completions, separated by a fixed operation tag. Duplicate requests are not new financial credits.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "casino_wallet_deposit_callbacks_total{job=\"casino-wallet\"}",
+          "legendFormat": "{{operation}} · {{outcome}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Round outcomes · since backend start",
+      "type": "timeseries",
+      "description": "Completed only after commit; controlled rejections and technical failures are separate outcomes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 28,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "casino_wallet_rounds_total{job=\"casino-wallet\"}",
+          "legendFormat": "{{outcome}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Bonus lifecycle · since backend start",
+      "type": "timeseries",
+      "description": "Committed COMPLETED/EXPIRED transitions, including transitions with zero remaining bonus. Repeated resolution does not increment.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "casino-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 28,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "casino-prometheus"
+          },
+          "expr": "casino_wallet_bonus_lifecycle_total{job=\"casino-wallet\"}",
+          "legendFormat": "{{outcome}}",
+          "range": true
+        }
+      ]
+    }
+  ]
+}

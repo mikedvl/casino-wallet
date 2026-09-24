@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: Casino Wallet
+    orgId: 1
+    type: file
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

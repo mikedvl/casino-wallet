@@ -1,0 +1,16 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="02 - Backend" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <option name="FRAME_DEACTIVATION_UPDATE_POLICY" value="UpdateClassesAndResources" />
+    <envs>
+      <env name="DB_HOST" value="localhost" />
+      <env name="DB_PORT" value="15432" />
+    </envs>
+    <module name="com.example.casino-wallet.main" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.example.casinowallet.CasinoWalletApplication" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/backend" />
+    <method v="2">
+      <option name="RunConfigurationTask" enabled="true" run_configuration_name="01 - PostgreSQL" run_configuration_type="docker-deploy" />
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

@@ -1,0 +1,17 @@
+# Apply explicitly together with compose.yaml; never loaded by the default demo.
+services:
+  backend:
+    environment:
+      SPRING_PROFILES_ACTIVE: observability
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

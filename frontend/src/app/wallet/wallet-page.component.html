@@ -1,0 +1,167 @@
+<main>
+  <header class="page-header">
+    <div>
+      <p class="eyebrow">{{ t('demoLabel') }}</p>
+      <h1>{{ t('title') }}</h1>
+      <p class="subtitle">{{ t('subtitle') }}</p>
+    </div>
+    <div class="languages" role="group" [attr.aria-label]="t('language')">
+      <button type="button" lang="en" (click)="i18n.setLanguage('en')" [attr.aria-pressed]="i18n.language() === 'en'">EN</button>
+      <button type="button" lang="uk" (click)="i18n.setLanguage('uk')" [attr.aria-pressed]="i18n.language() === 'uk'">UK</button>
+    </div>
+  </header>
+
+  <section class="wallet-section" [attr.aria-label]="t('balances')" [attr.aria-busy]="facade.loadingWallet()">
+    <div class="section-heading">
+      <h2>{{ t('balances') }}</h2>
+      <button class="secondary" type="button" data-testid="refresh" (click)="facade.refresh()"
+              [disabled]="facade.busy() || facade.loadingWallet() || facade.loadingLedger()">{{ t('refresh') }}</button>
+    </div>
+    @if (facade.loadingWallet()) { <p role="status">{{ t('loadingWallet') }}</p> }
+    @if (facade.walletError()) {
+      <div class="error" role="alert">
+        <p>{{ t('errorWallet') }}</p>
+        <button type="button" data-testid="retry-wallet" (click)="facade.refresh()">{{ t('retry') }}</button>
+      </div>
+    }
+    @if (facade.wallet(); as wallet) {
+      <dl class="balances">
+        <div class="real-card"><dt>{{ t('realBalance') }}</dt><dd data-testid="real-balance">{{ wallet.realBalance }} <span>EUR</span></dd></div>
+        <div class="bonus-card"><dt>{{ t('bonusBalance') }}</dt><dd data-testid="bonus-balance">{{ wallet.bonusBalance }} <span>EUR</span></dd></div>
+      </dl>
+      <section class="bonus-panel" aria-labelledby="bonus-title">
+        <div class="section-heading">
+          <h2 id="bonus-title">{{ t('welcomeBonus') }}</h2>
+          @if (wallet.bonus; as bonus) { <span class="badge" data-testid="bonus-status">{{ bonusLabel(bonus.status) }}</span> }
+        </div>
+        @if (wallet.bonus; as bonus) {
+          <dl class="bonus-details">
+            <div><dt>{{ t('initialAmount') }}</dt><dd>{{ bonus.initialAmount }} EUR</dd></div>
+            <div><dt>{{ t('wagering') }}</dt><dd data-testid="wagering">{{ bonus.wageringProgress }} / {{ bonus.wageringTarget }} EUR</dd></div>
+            <div><dt>{{ t('expiresAt') }}</dt><dd><time [attr.datetime]="bonus.expiresAt">{{ bonus.expiresAt | date:'yyyy-MM-dd HH:mm:ss':'UTC' }}</time></dd></div>
+          </dl>
+          <p class="hint">{{ bonusHint(bonus.status) }}</p>
+        } @else {
+          <p class="strong">{{ t('noBonus') }}</p>
+          <p class="hint">{{ t('bonusOffer') }}</p>
+        }
+      </section>
+    }
+  </section>
+
+  <div class="actions-grid">
+    <section class="panel" aria-labelledby="deposit-title">
+      <h2 id="deposit-title">{{ t('depositTitle') }}</h2>
+      <p class="hint">{{ t('depositHint') }}</p>
+      <form [formGroup]="depositForm" (ngSubmit)="createDeposit()" [attr.aria-busy]="facade.depositBusy()">
+        <label for="deposit-amount">{{ t('amount') }}</label>
+        <input id="deposit-amount" type="text" inputmode="decimal" autocomplete="off" formControlName="amount"
+               [attr.aria-invalid]="depositForm.controls.amount.touched && depositForm.controls.amount.invalid"
+               [attr.aria-describedby]="depositForm.controls.amount.touched && depositForm.controls.amount.invalid ? 'deposit-amount-error' : null">
+        @if (depositForm.controls.amount.touched && depositForm.controls.amount.invalid) {
+          <p class="field-error" id="deposit-amount-error">{{ t('positiveAmount') }}</p>
+        }
+        <button type="submit" data-testid="create-deposit" [disabled]="depositForm.invalid || actionsDisabled()">
+          {{ t(facade.depositBusy() && !facade.deposit() ? 'creatingDeposit' : 'createDeposit') }}
+        </button>
+      </form>
+      @if (facade.depositError(); as error) { <p role="alert" class="error">{{ t(error) }}</p> }
+      @if (facade.deposit(); as deposit) {
+        <div class="receipt" data-testid="deposit-result">
+          <p role="status">{{ t(deposit.status === 'PENDING' ? 'depositCreated' : 'depositSuccess') }}</p>
+          <p class="strong">{{ deposit.amount }} EUR <span class="badge">{{ t(deposit.status === 'PENDING' ? 'depositPending' : 'depositCompleted') }}</span></p>
+          <p class="identifier">{{ t('depositId') }}: <span>{{ deposit.depositId }}</span></p>
+          @if (deposit.status === 'PENDING') {
+            <button type="button" data-testid="complete-deposit" (click)="facade.completeDeposit()" [disabled]="actionsDisabled()">
+              {{ t(facade.depositBusy() ? 'completingDeposit' : 'completeDeposit') }}
+            </button>
+          }
+        </div>
+      }
+      <p class="hint demo-note">{{ t('demoHint') }}</p>
+    </section>
+
+    <section class="panel" aria-labelledby="round-title">
+      <h2 id="round-title">{{ t('roundTitle') }}</h2>
+      <p class="hint">{{ t('roundHint') }}</p>
+      <form [formGroup]="roundForm" (ngSubmit)="playRound()" [attr.aria-busy]="facade.roundBusy()">
+        <div class="round-inputs">
+          <div>
+            <label for="round-stake">{{ t('stake') }}</label>
+            <input id="round-stake" type="text" inputmode="decimal" autocomplete="off" formControlName="stake"
+                   [attr.aria-invalid]="roundForm.controls.stake.touched && roundForm.controls.stake.invalid"
+                   [attr.aria-describedby]="roundForm.controls.stake.touched && roundForm.controls.stake.invalid ? 'stake-error' : null">
+            @if (roundForm.controls.stake.touched && roundForm.controls.stake.invalid) {
+              <p class="field-error" id="stake-error">{{ t('positiveAmount') }}</p>
+            }
+          </div>
+          <div>
+            <label for="round-win">{{ t('totalWin') }}</label>
+            <input id="round-win" type="text" inputmode="decimal" autocomplete="off" formControlName="totalWin"
+                   [attr.aria-invalid]="roundForm.controls.totalWin.touched && roundForm.controls.totalWin.invalid"
+                   aria-describedby="payout-hint win-error">
+            <p class="field-error" id="win-error">
+              @if (roundForm.controls.totalWin.touched && roundForm.controls.totalWin.invalid) { {{ t('nonnegativeAmount') }} }
+            </p>
+          </div>
+        </div>
+        <p class="hint" id="payout-hint">{{ t('payoutHint') }}</p>
+        <button type="submit" data-testid="play-round" [disabled]="roundForm.invalid || actionsDisabled()">
+          {{ t(facade.roundBusy() ? 'playingRound' : 'playRound') }}
+        </button>
+      </form>
+      @if (facade.roundError(); as error) { <p role="alert" class="error">{{ t(error) }}</p> }
+      @if (facade.roundResult(); as result) {
+        <div class="receipt" data-testid="round-result">
+          <p class="strong" role="status">{{ t('roundSuccess') }}</p>
+          <p>{{ t('realBalance') }}: {{ result.realBalance }} EUR · {{ t('bonusBalance') }}: {{ result.bonusBalance }} EUR</p>
+          <p class="identifier">{{ t('roundId') }}: <span>{{ result.roundId }}</span></p>
+        </div>
+      }
+    </section>
+  </div>
+
+  <section class="panel ledger-panel" aria-labelledby="ledger-title" [attr.aria-busy]="facade.loadingLedger()">
+    <h2 id="ledger-title">{{ t('transactions') }}</h2>
+    <p class="hint">{{ t('ledgerHint') }}</p>
+    @if (facade.loadingLedger()) { <p role="status">{{ t('loadingLedger') }}</p> }
+    @if (facade.ledgerError()) {
+      <div class="error" role="alert">
+        <p>{{ t('errorLedger') }}</p>
+        <button type="button" data-testid="retry-ledger" (click)="facade.refresh()" [disabled]="actionsDisabled()">{{ t('retry') }}</button>
+      </div>
+    }
+    @if (facade.ledgerPage(); as ledger) {
+      @if (ledger.items.length === 0) { <p class="empty-state">{{ t('emptyLedger') }}</p> }
+      @else {
+        <div class="table-scroll" tabindex="0" role="region" [attr.aria-label]="t('transactions')">
+          <table>
+            <caption class="visually-hidden">{{ t('transactions') }}</caption>
+            <thead><tr>
+              <th scope="col">{{ t('date') }}</th><th scope="col">{{ t('wallet') }}</th><th scope="col">{{ t('operation') }}</th>
+              <th scope="col" class="numeric">{{ t('change') }}</th><th scope="col" class="numeric">{{ t('balanceAfter') }}</th><th scope="col">{{ t('reference') }}</th>
+            </tr></thead>
+            <tbody>
+              @for (entry of ledger.items; track entry.id) {
+                <tr>
+                  <td><time [attr.datetime]="entry.createdAt">{{ entry.createdAt | date:'yyyy-MM-dd HH:mm:ss':'UTC' }}</time></td>
+                  <td>{{ walletLabel(entry.walletType) }}</td><td>{{ operationLabel(entry.operationType) }}</td>
+                  <td class="numeric" [class.debit]="entry.amount.startsWith('-')">{{ entry.amount }}</td>
+                  <td class="numeric">{{ entry.balanceAfter }}</td>
+                  <td class="reference">{{ referenceLabel(entry.referenceType) }}<span>{{ entry.referenceId }}</span></td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      }
+      <nav class="pagination" [attr.aria-label]="t('transactions')">
+        <button class="secondary" type="button" data-testid="previous-page" (click)="facade.goToPage(ledger.page - 1)"
+                [disabled]="actionsDisabled() || ledger.page === 0">{{ t('previous') }}</button>
+        <span>{{ t('page') }} {{ ledger.totalPages === 0 ? 0 : ledger.page + 1 }} {{ t('of') }} {{ ledger.totalPages }} · {{ ledger.totalElements }} {{ t('entries') }}</span>
+        <button class="secondary" type="button" data-testid="next-page" (click)="facade.goToPage(ledger.page + 1)"
+                [disabled]="actionsDisabled() || ledger.page + 1 >= ledger.totalPages">{{ t('next') }}</button>
+      </nav>
+    }
+  </section>
+</main>

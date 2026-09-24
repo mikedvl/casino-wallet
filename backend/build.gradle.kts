@@ -1,0 +1,52 @@
+import org.springframework.boot.gradle.plugin.SpringBootPlugin
+
+plugins {
+    kotlin("jvm") version "2.2.21"
+    kotlin("plugin.spring") version "2.2.21"
+    id("org.springframework.boot") version "3.5.16"
+}
+
+group = "com.example"
+version = "0.1.0-SNAPSHOT"
+
+repositories {
+    mavenCentral()
+}
+
+kotlin {
+    jvmToolchain(21)
+    compilerOptions {
+        allWarningsAsErrors.set(true)
+        freeCompilerArgs.add("-Xjsr305=strict")
+    }
+}
+
+dependencies {
+    implementation(platform(SpringBootPlugin.BOM_COORDINATES))
+    implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.springframework.boot:spring-boot-starter-jdbc")
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+    runtimeOnly("io.micrometer:micrometer-registry-prometheus")
+    implementation("io.micrometer:micrometer-tracing-bridge-otel")
+    runtimeOnly("io.opentelemetry:opentelemetry-exporter-otlp")
+    implementation("org.flywaydb:flyway-core")
+    implementation(kotlin("reflect"))
+    runtimeOnly("org.flywaydb:flyway-database-postgresql")
+    runtimeOnly("org.postgresql:postgresql")
+    // bootJar resolves developmentOnly independently to exclude development dependencies.
+    developmentOnly(platform(SpringBootPlugin.BOM_COORDINATES))
+    developmentOnly("org.springframework.boot:spring-boot-devtools")
+
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.testcontainers:junit-jupiter:1.21.4")
+    testImplementation("org.testcontainers:postgresql:1.21.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+
+tasks.bootJar {
+    archiveFileName.set("casino-wallet.jar")
+}
